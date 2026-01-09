@@ -4,27 +4,12 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path
 
 
-def _try_set_window_icon(root: tkinter.Tk) -> None:
-    """Best-effort window icon.
-
-    Note: On macOS, this may not change the Dock icon unless you bundle as an app.
-    """
-
+def _set_window_icon(root: tkinter.Tk) -> None:
     base_dir = Path(__file__).resolve().parent
-    icon_path = base_dir / "icon.png"
-    if not icon_path.exists():
-        icon_path = base_dir / "assets" / "icon.png"
-    if not icon_path.exists():
-        return
-
-    try:
-        icon_image = tkinter.PhotoImage(file=str(icon_path))
-        root.iconphoto(True, icon_image)
-        # Prevent garbage collection of the image.
-        root._icon_image = icon_image  # type: ignore[attr-defined]
-    except Exception:
-        # Don't crash if icon can't be loaded.
-        return
+    icon_path = base_dir / "assets" / "icon.png"
+    icon_image = tkinter.PhotoImage(file=str(icon_path))
+    root.iconphoto(True, icon_image)
+    root._icon_image = icon_image  # type: ignore[attr-defined]
 
 def _format_dropped_files(paths: Iterable[str]) -> str:
     paths = [p for p in paths if p]
@@ -40,7 +25,7 @@ def create_window() -> None:
     root.geometry("600x400")
     root.resizable(False, False)
 
-    _try_set_window_icon(root)
+    _set_window_icon(root)
 
     default_font = ("Inter", 16)
     root.option_add("*Font", default_font)

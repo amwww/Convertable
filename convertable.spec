@@ -1,6 +1,6 @@
+#!/usr/bin/env python3
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
 from pathlib import Path
 
 block_cipher = None
@@ -8,21 +8,16 @@ block_cipher = None
 project_dir = Path(__file__).resolve().parent
 entry = str(project_dir / "main.py")
 
-# Best-effort icon: PyInstaller on macOS expects .icns
-icon_path = None
-for candidate in [project_dir / "assets" / "icon.icns", project_dir / "icon.icns"]:
-    if candidate.exists():
-        icon_path = str(candidate)
-        break
+icon_path = project_dir / "assets" / "icon.icns"
+if not icon_path.exists():
+    raise FileNotFoundError(f"Missing app icon: {icon_path}")
 
-# Bundle optional data files (so window icon loads from inside the .app)
-datas = []
-for src, dest in [
-    (project_dir / "icon.png", "."),
-    (project_dir / "assets" / "icon.png", "assets"),
-]:
-    if src.exists():
-        datas.append((str(src), dest))
+# Bundle data files (so window icon loads from inside the .app)
+icon_png_path = project_dir / "assets" / "icon.png"
+if not icon_png_path.exists():
+    raise FileNotFoundError(f"Missing window icon PNG: {icon_png_path}")
+
+datas = [(str(icon_png_path), "assets")]
 
 app_name = "Convertable"
 bundle_id = "com.amwww.convertable"
@@ -63,7 +58,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -72,13 +67,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_path,
+    icon=str(icon_path),
 )
 
 app = BUNDLE(
     exe,
     name=f"{app_name}.app",
-    icon=icon_path,
+    icon=str(icon_path),
     bundle_identifier=bundle_id,
     info_plist=info_plist,
 )
