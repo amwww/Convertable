@@ -4,6 +4,10 @@ import filetype as ft
 from PIL import Image
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip
+from typing import Callable
+
+
+ProgressCallback = Callable[[float], None]
 
 class FileConverter:
 
@@ -18,8 +22,10 @@ class FileConverter:
         ext = outputFiletype.lower().lstrip('.')
         return os.path.join(self.outputPath, f"{base}.{ext}")
 
-    def convertImage(self, inputFile: str, outputFiletype: str) -> str:
+    def convertImage(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
         self.ensureOutputPath()
+        if progress:
+            progress(0.1)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
 
         with Image.open(inputFile) as img:
@@ -28,19 +34,31 @@ class FileConverter:
                 img = img.convert("RGB")
             img.save(outputFile, format=fmt)
 
+        if progress:
+            progress(1.0)
+
         return outputFile
 
-    def convertAudio(self, inputFile: str, outputFiletype: str) -> str:
+    def convertAudio(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
         self.ensureOutputPath()
+        if progress:
+            progress(0.05)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
 
         audio = AudioSegment.from_file(inputFile)
+        if progress:
+            progress(0.5)
         audio.export(outputFile, format=outputFiletype.lower().lstrip('.'))
+
+        if progress:
+            progress(1.0)
 
         return outputFile
 
-    def convertVideo(self, inputFile: str, outputFiletype: str) -> str:
+    def convertVideo(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
         self.ensureOutputPath()
+        if progress:
+            progress(0.02)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
 
         ext = outputFiletype.lower().lstrip('.')
@@ -50,9 +68,12 @@ class FileConverter:
             else:
                 clip.write_videofile(outputFile)
 
+        if progress:
+            progress(1.0)
+
         return outputFile
 
-    def convertFile(self, inputFile: str, outputFiletype: str) -> str:
+    def convertFile(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
         kind = ft.guess(inputFile)
         if kind is None:
             raise ValueError("Could not detect input file type.")
@@ -77,26 +98,15 @@ class FileConverter:
             )
 
         if inputCategory == "image":
-            return self.convertImage(inputFile, outputExt)
+            return self.convertImage(inputFile, outputExt, progress=progress)
         if inputCategory == "audio":
-            return self.convertAudio(inputFile, outputExt)
+            return self.convertAudio(inputFile, outputExt, progress=progress)
         if inputCategory == "video":
-            return self.convertVideo(inputFile, outputExt)
+            return self.convertVideo(inputFile, outputExt, progress=progress)
 
         raise ValueError("Conversion category not implemented.")
 
-
-def convertFile(inputFile, outputFiletype, outputPath): #Just convience you can use this one
+def convertFile(inputFile: str, outputFiletype: str, outputPath: str, progress: ProgressCallback | None = None) -> str:
+    """Convenience wrapper for one-off conversions."""
     converter = FileConverter(outputPath)
-    return converter.convertFile(inputFile, outputFiletype)
-
-
-def main():
-    testFile = '/Users/adrian/Desktop/eh v2/Convertable/convertableIcon.png'
-    converter = FileConverter('/Users/adrian/Desktop/eh v2/Convertable/testing/outputs')
-    output = converter.convertFile(testFile, 'jpeg')
-    print(f'Converted to: {output}')
-
-
-if __name__ == "__main__":
-    main()
+    return converter.convertFile(inputFile, outputFiletype, progress=progress)
