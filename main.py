@@ -2,10 +2,12 @@ import os
 import sys
 import tkinter
 import mimetypes
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from tkinter import ttk
+from tkinter import font as tkfont
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -82,6 +84,7 @@ class ConvertableApp:
         self.root = TkinterDnD.Tk()
         self.root.title("Convertable")
         self.root.geometry("900x560")
+        self.root.resizable(True, True)
 
         default_font = ("Inter", 14)
         self.root.option_add("*Font", default_font)
@@ -89,6 +92,15 @@ class ConvertableApp:
 
         self.dropped: list[DroppedFile] = []
         self.jobs: list[ConversionJob] = []
+
+        self.remove_icon = self._load_remove_icon()
+
+        self.font_normal = tkfont.nametofont("TkDefaultFont")
+        self.font_bold = self.font_normal.copy()
+        self.font_bold.configure(weight="bold")
+
+        self.selected_paths: list[str] = []
+        self._convert_rows: dict[str, dict[str, tkinter.Widget]] = {}
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
@@ -119,40 +131,45 @@ class ConvertableApp:
 
     # -------------------- Convert Tab --------------------
     def _build_convert_tab(self) -> None:
-        container = ttk.Frame(self.convert_frame)
-        container.pack(fill="both", expand=True)
+        self.convert_frame.rowconfigure(1, weight=1)
+        self.convert_frame.columnconfigure(0, weight=1)
 
-        left = ttk.Frame(container)
-        left.pack(side="left", fill="both", expand=True)
+        header = ttk.Frame(self.convert_frame)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
 
-        right = ttk.Frame(container, width=260)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
+        ttk.Label(header, text="File").grid(row=0, column=0, sticky="w", padx=(12, 6), pady=(10, 6))
+        ttk.Label(header, text="").grid(row=0, column=1, sticky="w", padx=(0, 6), pady=(10, 6))
+        ttk.Label(header, text="Size").grid(row=0, column=2, sticky="e", padx=(0, 12), pady=(10, 6))
+        ttk.Label(header, text="MIME").grid(row=0, column=3, sticky="w", padx=(0, 12), pady=(10, 6))
+        ttk.Label(header, text="Ext").grid(row=0, column=4, sticky="w", padx=(0, 12), pady=(10, 6))
 
-        columns = ("name", "size", "mime", "ext")
-        self.convert_tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
-        self.convert_tree.heading("name", text="File")
-        self.convert_tree.heading("size", text="Size")
-        self.convert_tree.heading("mime", text="MIME")
-        self.convert_tree.heading("ext", text="Ext")
-        self.convert_tree.column("name", width=430, anchor="w")
-        self.convert_tree.column("size", width=110, anchor="e")
-        self.convert_tree.column("mime", width=200, anchor="w")
-        self.convert_tree.column("ext", width=90, anchor="center")
-        self.convert_tree.pack(fill="both", expand=True)
+        # Scrollable file list
+        list_host = ttk.Frame(self.convert_frame)
+        list_host.grid(row=1, column=0, sticky="nsew")
+        list_host.rowconfigure(0, weight=1)
+        list_host.columnconfigure(0, weight=1)
 
-        tree_scroll = ttk.Scrollbar(left, orient="vertical", command=self.convert_tree.yview)
-        tree_scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
-        self.convert_tree.configure(yscrollcommand=tree_scroll.set)
+        self.convert_canvas = tkinter.Canvas(list_host, highlightthickness=0)
+        self.convert_canvas.grid(row=0, column=0, sticky="nsew")
+        self.convert_scroll = ttk.Scrollbar(list_host, orient="vertical", command=self.convert_canvas.yview)
+        self.convert_scroll.grid(row=0, column=1, sticky="ns")
+        self.convert_canvas.configure(yscrollcommand=self.convert_scroll.set)
 
-        self.convert_tree.bind("<<TreeviewSelect>>", self._on_convert_selection)
+        self.convert_list_frame = ttk.Frame(self.convert_canvas)
+        self._convert_list_window = self.convert_canvas.create_window((0, 0), window=self.convert_list_frame, anchor="nw")
 
-        ttk.Label(right, text="Actions").pack(anchor="w", pady=(12, 8), padx=12)
+        self.convert_list_frame.bind("<Configure>", self._on_convert_list_configure)
+        self.convert_canvas.bind("<Configure>", self._on_convert_canvas_configure)
 
-        self.selected_file_label = ttk.Label(right, text="Select file(s)", wraplength=240, justify="left")
-        self.selected_file_label.pack(anchor="w", pady=(0, 12), padx=12)
+        # Bottom actions bar (always visible, avoids disappearing buttons on narrow widths)
+        actions = ttk.Frame(self.convert_frame)
+        actions.grid(row=2, column=0, sticky="ew")
 
-        ttk.Label(right, text="Convert to").pack(anchor="w", padx=12)
+        self.selected_file_label = ttk.Label(actions, text="Select file(s)")
+        self.selected_file_label.pack(side="left", padx=12, pady=10)
+
+        ttk.Label(actions, text="Convert to").pack(side="left", padx=(8, 6))
         self._all_convert_options = [
             ".PNG",
             ".JPEG",
@@ -162,50 +179,63 @@ class ConvertableApp:
         ]
         self.convert_to_var = tkinter.StringVar(value=self._all_convert_options[0])
         self.convert_to = ttk.Combobox(
-            right,
+            actions,
             textvariable=self.convert_to_var,
             values=self._all_convert_options,
             state="normal",
         )
-        self.convert_to.pack(fill="x", pady=(2, 12), padx=12)
+        self.convert_to.pack(side="left", padx=(0, 10), pady=8)
         self.convert_to.bind("<KeyRelease>", self._filter_convert_options)
 
-        self.remove_btn = ttk.Button(right, text="Remove", command=self._remove_selected)
-        self.remove_btn.pack(fill="x", pady=(0, 8), padx=12)
-
-        self.convert_btn = ttk.Button(right, text="Convert", command=self._queue_conversion)
-        self.convert_btn.pack(fill="x", padx=12)
+        self.convert_btn = ttk.Button(actions, text="Convert", command=self._queue_conversion)
+        self.convert_btn.pack(side="right", padx=12, pady=8)
 
         self._set_action_enabled(False)
 
     def _set_action_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        self.remove_btn.configure(state=state)
         self.convert_btn.configure(state=state)
         self.convert_to.configure(state=("normal" if enabled else "disabled"))
 
-    def _on_convert_selection(self, _event=None) -> None:
-        sel = list(self.convert_tree.selection())
-        if not sel:
+    def _on_convert_list_configure(self, _event=None) -> None:
+        self.convert_canvas.configure(scrollregion=self.convert_canvas.bbox("all"))
+
+    def _on_convert_canvas_configure(self, event) -> None:
+        # Make inner frame match canvas width so filename column can shrink.
+        self.convert_canvas.itemconfigure(self._convert_list_window, width=event.width)
+
+    def _set_selected_paths(self, paths: list[str]) -> None:
+        # Preserve order and uniqueness.
+        seen: set[str] = set()
+        self.selected_paths = []
+        for p in paths:
+            if p in seen:
+                continue
+            seen.add(p)
+            self.selected_paths.append(p)
+        self._update_convert_selection_ui()
+
+    def _update_convert_selection_ui(self) -> None:
+        # Update label + enabled state
+        if not self.selected_paths:
             self.selected_file_label.configure(text="Select file(s)")
             self._set_action_enabled(False)
-            return
-        if len(sel) > 1:
-            self.selected_file_label.configure(text=f"{len(sel)} files selected")
+        elif len(self.selected_paths) == 1:
+            f = self._find_dropped_by_path(self.selected_paths[0])
+            self.selected_file_label.configure(text=(f.name if f else "Select file(s)"))
             self._set_action_enabled(True)
-            self._set_convert_options_for_selection(sel)
-            return
+            if f:
+                self._set_convert_options_for_kind(f.mime)
+        else:
+            self.selected_file_label.configure(text=f"{len(self.selected_paths)} files selected")
+            self._set_action_enabled(True)
+            self._set_convert_options_for_selection(self.selected_paths)
 
-        item_id = sel[0]
-        dropped_file = self._find_dropped_by_path(item_id)
-        if dropped_file is None:
-            self.selected_file_label.configure(text="Select file(s)")
-            self._set_action_enabled(False)
-            return
-
-        self.selected_file_label.configure(text=dropped_file.name)
-        self._set_action_enabled(True)
-        self._set_convert_options_for_kind(dropped_file.mime)
+        # Update row visual highlight (bold filename)
+        for path, widgets in self._convert_rows.items():
+            name_label = widgets.get("name")
+            if isinstance(name_label, ttk.Label):
+                name_label.configure(font=(self.font_bold if path in set(self.selected_paths) else self.font_normal))
 
     def _set_convert_options_for_selection(self, selected_paths: list[str]) -> None:
         mimes: list[str] = []
@@ -243,16 +273,18 @@ class ConvertableApp:
         self.convert_to.configure(values=filtered if filtered else self._all_convert_options)
 
     def _remove_selected(self) -> None:
-        sel = self.convert_tree.selection()
+        sel = set(self.selected_paths)
         if not sel:
             return
-        selected_paths = set(sel)
-        self.dropped = [f for f in self.dropped if f.path not in selected_paths]
-        self.jobs = [j for j in self.jobs if j.source_path not in selected_paths]
+        self._remove_paths(sel)
+
+    def _remove_paths(self, paths: set[str]) -> None:
+        self.dropped = [f for f in self.dropped if f.path not in paths]
+        self.jobs = [j for j in self.jobs if j.source_path not in paths]
         self._refresh_all_lists()
 
     def _queue_conversion(self) -> None:
-        sel = list(self.convert_tree.selection())
+        sel = list(self.selected_paths)
         if not sel:
             return
         target_ext = self.convert_to_var.get().strip().upper()
@@ -313,27 +345,101 @@ class ConvertableApp:
         # Switch to Convert tab and highlight newly-added files.
         self.notebook.select(self.convert_frame)
         if new_paths:
-            self.convert_tree.selection_set(new_paths)
-            self.convert_tree.focus(new_paths[0])
-            self.convert_tree.see(new_paths[0])
+            self._set_selected_paths(new_paths)
+            self._scroll_to_path(new_paths[0])
 
     def _refresh_all_lists(self) -> None:
         self._refresh_convert_list()
         self._refresh_result_list()
 
     def _refresh_convert_list(self) -> None:
-        for item in self.convert_tree.get_children(""):
-            self.convert_tree.delete(item)
-        for f in self.dropped:
-            # Use iid as the full path for stable mapping.
-            self.convert_tree.insert(
-                "",
-                "end",
-                iid=f.path,
-                values=(f.name, _human_size(f.size_bytes), f.mime, f.ext),
+        # Clear existing rows
+        for child in list(self.convert_list_frame.winfo_children()):
+            child.destroy()
+        self._convert_rows.clear()
+
+        # Keep selection only for remaining files
+        remaining = {f.path for f in self.dropped}
+        self.selected_paths = [p for p in self.selected_paths if p in remaining]
+
+        for row_idx, f in enumerate(self.dropped):
+            row = ttk.Frame(self.convert_list_frame)
+            row.grid(row=row_idx, column=0, sticky="ew")
+            row.columnconfigure(0, weight=1)
+
+            name_label = ttk.Label(row, text=f.name, anchor="w")
+            name_label.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=6)
+
+            remove_label = ttk.Label(row, image=self.remove_icon)
+            remove_label.grid(row=0, column=1, sticky="w", padx=(0, 10), pady=6)
+            remove_label.bind("<Button-1>", lambda _e, p=f.path: self._remove_paths({p}))
+
+            size_label = ttk.Label(row, text=_human_size(f.size_bytes), anchor="e")
+            size_label.grid(row=0, column=2, sticky="e", padx=(0, 12), pady=6)
+
+            mime_label = ttk.Label(row, text=f.mime, anchor="w")
+            mime_label.grid(row=0, column=3, sticky="w", padx=(0, 12), pady=6)
+
+            ext_label = ttk.Label(row, text=f.ext, anchor="w")
+            ext_label.grid(row=0, column=4, sticky="w", padx=(0, 12), pady=6)
+
+            # Click anywhere on row (except the remove icon) to select.
+            def _select(_event=None, p=f.path) -> None:
+                self._set_selected_paths([p])
+
+            row.bind("<Button-1>", _select)
+            name_label.bind("<Button-1>", _select)
+            size_label.bind("<Button-1>", _select)
+            mime_label.bind("<Button-1>", _select)
+            ext_label.bind("<Button-1>", _select)
+
+            self._convert_rows[f.path] = {
+                "row": row,
+                "name": name_label,
+                "remove": remove_label,
+            }
+
+        self._update_convert_selection_ui()
+
+    def _scroll_to_path(self, path: str) -> None:
+        widgets = self._convert_rows.get(path)
+        if not widgets:
+            return
+        row = widgets.get("row")
+        if not isinstance(row, ttk.Frame):
+            return
+        self.convert_canvas.update_idletasks()
+        y = row.winfo_y()
+        height = max(1, self.convert_list_frame.winfo_height())
+        self.convert_canvas.yview_moveto(y / height)
+
+    def _load_remove_icon(self) -> tkinter.PhotoImage:
+        base_dir = _resource_base_dir()
+        svg_path = base_dir / "assets" / "x.svg"
+
+        # Try to render the SVG using CairoSVG (preferred).
+        try:
+            import cairosvg  # type: ignore
+
+            svg_text = svg_path.read_text(encoding="utf-8")
+            svg_text = svg_text.replace("rgba(0, 0, 0, 1)", "rgba(255, 0, 0, 1)")
+            png_bytes = cairosvg.svg2png(
+                bytestring=svg_text.encode("utf-8"),
+                output_width=14,
+                output_height=14,
             )
-        self._set_action_enabled(False)
-        self.selected_file_label.configure(text="Select file(s)")
+            png_b64 = base64.b64encode(png_bytes).decode("ascii")
+            return tkinter.PhotoImage(data=png_b64)
+        except Exception:
+            pass
+
+        # Fallback: draw a small red X (keeps UI functional without SVG support).
+        img = tkinter.PhotoImage(width=14, height=14)
+        red = "#ff0000"
+        for i in range(14):
+            img.put(red, (i, i))
+            img.put(red, (13 - i, i))
+        return img
 
     def _refresh_result_list(self) -> None:
         for item in self.result_tree.get_children(""):
