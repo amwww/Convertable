@@ -2,10 +2,12 @@ import tkinter
 from typing import Iterable
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path
+import sys
 
 
 def _set_window_icon(root: tkinter.Tk) -> None:
-    base_dir = Path(__file__).resolve().parent
+    # In a PyInstaller app, data files live under sys._MEIPASS.
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     icon_path = base_dir / "assets" / "icon.png"
     icon_image = tkinter.PhotoImage(file=str(icon_path))
     root.iconphoto(True, icon_image)

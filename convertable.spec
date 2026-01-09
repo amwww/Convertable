@@ -5,7 +5,10 @@ from pathlib import Path
 
 block_cipher = None
 
-project_dir = Path(__file__).resolve().parent
+# PyInstaller does not reliably define __file__ when executing the spec.
+# Prefer PyInstaller-provided globals when available.
+_specpath = globals().get("SPECPATH") or globals().get("specpath")
+project_dir = Path(_specpath).resolve() if _specpath else Path.cwd().resolve()
 entry = str(project_dir / "main.py")
 
 icon_path = project_dir / "assets" / "icon.icns"
