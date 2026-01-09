@@ -1,0 +1,5 @@
+filetype
+Pillow
+pydub
+moviepy==1.0.3
+audioop-lts
