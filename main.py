@@ -16,6 +16,7 @@ from datetime import datetime
 from tkinter import ttk
 from tkinter import font as tkfont
 from tkinter import messagebox
+from tkinter import filedialog
 
 import utils
 
@@ -1710,10 +1711,10 @@ class ConvertableApp:
         self.result_canvas.bind("<Enter>", self._bind_result_mousewheel)
         self.result_canvas.bind("<Leave>", self._unbind_result_mousewheel)
 
-        # Bottom actions bar (Save)
+        # Bottom actions bar (Save As)
         actions = ttk.Frame(container)
         actions.grid(row=1, column=0, sticky="ew")
-        self.save_btn = ttk.Button(actions, text="Save", command=self._save_selected_results)
+        self.save_btn = ttk.Button(actions, text="Save As", command=self._save_selected_results)
         self.save_btn.pack(side="right", padx=12, pady=8)
 
     def _on_result_drag_init(self, event=None, idx: int | None = None):
@@ -1980,8 +1981,37 @@ class ConvertableApp:
         if not src or not os.path.exists(src):
             return
 
-        os.makedirs(self._save_dir, exist_ok=True)
-        dest = self._unique_dest_path(self._save_dir, os.path.basename(src))
+        # Let the user pick a destination (Finder-style on macOS).
+        initial_dir = self._save_dir or os.path.dirname(src)
+        try:
+            os.makedirs(initial_dir, exist_ok=True)
+        except Exception:
+            initial_dir = os.path.dirname(src)
+
+        default_name = os.path.basename(src) if os.path.basename(src) else (res.source_name + res.target_ext)
+
+        dest = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Save As",
+            initialdir=initial_dir,
+            initialfile=default_name,
+            defaultextension=res.target_ext.lower(),
+            filetypes=[
+                (f"{res.target_ext} file", f"*{res.target_ext.lower()}"),
+                ("All files", "*.*"),
+            ],
+        )
+
+        if not dest:
+            # User cancelled.
+            return
+
+        dest_dir = os.path.dirname(dest) or "."
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception:
+            pass
+
         shutil.copy2(src, dest)
 
         # Update to saved path and delete temp to minimize disk usage.
