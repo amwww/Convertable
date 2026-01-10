@@ -84,13 +84,47 @@ class FileConverter:
     def convertAudio(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
         self.ensureOutputPath()
         if progress:
-            progress(0.05)
-        outputFile = self.buildOutputPath(inputFile, outputFiletype)
+            progress(0.02)
 
-        audio = AudioSegment.from_file(inputFile)
-        if progress:
-            progress(0.5)
-        audio.export(outputFile, format=outputFiletype.lower().lstrip('.'))
+        outputFile = self.buildOutputPath(inputFile, outputFiletype)
+        ext = outputFiletype.lower().lstrip(".")
+
+        ffmpeg = self._get_ffmpeg_exe()
+        duration = self._ffprobe_duration_seconds(ffmpeg, inputFile)
+
+        codec_args: list[str]
+        if ext == "mp3":
+            codec_args = ["-c:a", "libmp3lame", "-q:a", "2"]
+        elif ext == "wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        elif ext == "m4a":
+            codec_args = ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            # Generic fallback: let ffmpeg pick reasonable defaults for the container.
+            codec_args = []
+
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "info",
+            "-stats_period",
+            "0.1",
+            "-i",
+            inputFile,
+            "-vn",
+            "-map",
+            "0:a:0",
+            *codec_args,
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            outputFile,
+        ]
+
+        self._run_ffmpeg_with_progress(cmd, duration, progress)
 
         if progress:
             progress(1.0)

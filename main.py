@@ -302,6 +302,9 @@ class ConvertableApp:
             ".PNG",
             ".JPEG",
             ".WEBP",
+            ".MP3",
+            ".WAV",
+            ".M4A",
             ".MP4",
             ".MOV",
         ]
@@ -860,6 +863,9 @@ class ConvertableApp:
         if mimes and all(m.startswith("image/") for m in mimes):
             self._set_convert_options_for_kind("image/")
             return
+        if mimes and all(m.startswith("audio/") for m in mimes):
+            self._set_convert_options_for_kind("audio/")
+            return
         if mimes and all(m.startswith("video/") for m in mimes):
             self._set_convert_options_for_kind("video/")
             return
@@ -868,10 +874,12 @@ class ConvertableApp:
     def _set_convert_options_for_kind(self, mime: str) -> None:
         if mime.startswith("image/"):
             options = [".PNG", ".JPEG", ".WEBP"]
+        elif mime.startswith("audio/"):
+            options = [".MP3", ".WAV", ".M4A"]
         elif mime.startswith("video/"):
             options = [".MP4", ".MOV"]
         else:
-            options = [".PNG", ".JPEG", ".WEBP", ".MP4", ".MOV"]
+            options = [".PNG", ".JPEG", ".WEBP", ".MP3", ".WAV", ".M4A", ".MP4", ".MOV"]
         self._all_convert_options = options
         self.convert_to.configure(values=options)
         if self.convert_to_var.get() not in options:
@@ -985,15 +993,27 @@ class ConvertableApp:
         self.save_btn = ttk.Button(actions, text="Save", command=self._save_selected_results)
         self.save_btn.pack(side="right", padx=12, pady=8)
 
-    def _on_result_drag_init(self, _event=None):
-        idx = self.selected_result_index
+    def _on_result_drag_init(self, event=None, idx: int | None = None):
+        # DragInitCmd must return (actions, types, data). For DND_FILES on macOS,
+        # data should be a Tcl list of file paths.
+        if idx is None:
+            idx = self.selected_result_index
         if idx is None or idx < 0 or idx >= len(self.results):
+            self._debug_log("DRAGINIT: no valid index")
             return
+
         out_path = self.results[idx].output_path
         if not out_path or not os.path.exists(out_path):
+            self._debug_log(f"DRAGINIT: missing output path idx={idx} out={out_path}")
             return
-        # tkdnd expects (actions, types, data)
-        return ("copy",), (DND_FILES,), out_path
+
+        try:
+            data = self.root.tk.call("list", out_path)
+        except Exception:
+            data = out_path
+
+        self._debug_log(f"DRAGINIT: idx={idx} out={out_path} data={str(data)!r}")
+        return ("copy",), (DND_FILES,), data
 
     def _bind_result_mousewheel(self, _event=None) -> None:
         self.root.bind_all("<MouseWheel>", self._on_result_mousewheel)
@@ -1169,8 +1189,20 @@ class ConvertableApp:
             if not os.path.exists(path):
                 raise FileNotFoundError(path)
 
+            def _is_video(p: str) -> bool:
+                ext = Path(p).suffix.lower()
+                if ext in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
+                    return True
+                guessed, _enc = mimetypes.guess_type(p, strict=False)
+                return bool(guessed and guessed.startswith("video/"))
+
             if sys.platform == "darwin":
-                # Finder-like preview (Quick Look).
+                # Finder-like preview (Quick Look) but avoid qlmanage for videos.
+                # On some macOS versions, qlmanage can crash when previewing certain movie files.
+                if _is_video(path):
+                    subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+
                 try:
                     subprocess.Popen(
                         ["qlmanage", "-p", path],
@@ -1326,7 +1358,19 @@ class ConvertableApp:
                 self._show_convert_context_menu(ev, p)
                 return "break"
 
+            def _dbl(ev, p=f.path) -> str | None:
+                # Ignore double-clicks on the remove icon.
+                try:
+                    current = ev.widget.find_withtag("current")
+                    if current and "remove" in ev.widget.gettags(current[0]):
+                        return "break"
+                except Exception:
+                    pass
+                self._on_convert_row_double_click(p)
+                return "break"
+
             c.bind("<Button-1>", _row_click)
+            c.bind("<Double-Button-1>", _dbl)
             c.tag_bind("remove", "<Button-1>", _remove_click)
 
             c.bind("<Button-3>", _ctx)
@@ -1353,6 +1397,52 @@ class ConvertableApp:
 
         self._refresh_row_visuals()
         self._update_job_bar()
+
+    def _find_latest_result_index_for_source(self, source_path: str) -> int | None:
+        for idx in range(len(self.results) - 1, -1, -1):
+            try:
+                if self.results[idx].source_path == source_path:
+                    return idx
+            except Exception:
+                continue
+        return None
+
+    def _scroll_to_result_index(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._result_rows):
+            return
+        row = self._result_rows[idx]
+        target = row.get("canvas")
+        if not isinstance(target, tkinter.Canvas):
+            return
+        try:
+            self.result_canvas.update_idletasks()
+            y = target.winfo_y()
+            height = max(1, self.result_list_frame.winfo_height())
+            self.result_canvas.yview_moveto(y / height)
+        except Exception:
+            pass
+
+    def _on_convert_row_double_click(self, source_path: str) -> None:
+        # If we've already produced a converted output for this source, jump to it.
+        idx = self._find_latest_result_index_for_source(source_path)
+        if idx is not None:
+            try:
+                self.notebook.select(self.result_frame)
+            except Exception:
+                pass
+            # Select + scroll + preview (consistent with Result tab behavior).
+            self._on_result_row_double_click(idx)
+            self._scroll_to_result_index(idx)
+            return
+
+        # Otherwise, queue a conversion for just this file.
+        try:
+            self.notebook.select(self.convert_frame)
+        except Exception:
+            pass
+        self._selection_anchor = source_path
+        self._set_selected_paths([source_path])
+        self._queue_conversion()
 
     def _show_convert_context_menu(self, event, path: str) -> None:
         try:
@@ -1504,7 +1594,10 @@ class ConvertableApp:
             # Drag-out support per row
             try:
                 row_canvas.drag_source_register(DND_FILES)  # type: ignore[attr-defined]
-                row_canvas.dnd_bind("<<DragInitCmd>>", self._on_result_drag_init)  # type: ignore[attr-defined]
+                def _drag_init(e, i=idx):
+                    return self._on_result_drag_init(e, i)
+
+                row_canvas.dnd_bind("<<DragInitCmd>>", _drag_init)  # type: ignore[attr-defined]
             except Exception:
                 pass
 
