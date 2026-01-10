@@ -234,7 +234,7 @@ class ConvertableApp:
         if f.mime == "inode/directory":
             return None
         ext = Path(f.path).suffix.lower()
-        if ext in {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".bmp", ".tiff", ".tif", ".gif"}:
+        if ext in {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".bmp", ".tiff", ".tif", ".gif", ".svg"}:
             return "image"
         if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".aif"}:
             return "audio"
