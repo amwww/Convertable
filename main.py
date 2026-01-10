@@ -337,8 +337,223 @@ class ConvertableApp:
     def _on_convert_canvas_configure(self, event) -> None:
         # Make inner frame match canvas width so filename column can shrink.
         self.convert_canvas.itemconfigure(self._convert_list_window, width=event.width)
-        self._update_name_clipping(event.width)
+        self._layout_convert_rows(event.width)
         self._refresh_row_visuals()
+
+    def _layout_convert_rows(self, width: int) -> None:
+        for row in self._convert_rows.values():
+            c = row.get("canvas")
+            if not isinstance(c, tkinter.Canvas):
+                continue
+            c.configure(width=width)
+            self._render_convert_row(row, width)
+
+    def _render_convert_row(self, row: dict[str, object], width: int) -> None:
+        c = row.get("canvas")
+        if not isinstance(c, tkinter.Canvas):
+            return
+        path = row.get("path")
+        if not isinstance(path, str):
+            return
+
+        dropped = self._find_dropped_by_path(path)
+        if dropped is None:
+            return
+
+        def _item_exists(item_id: int) -> bool:
+            try:
+                return bool(c.type(item_id))
+            except Exception:
+                return False
+
+        def _safe_delete(item_id: int) -> None:
+            try:
+                c.delete(item_id)
+            except Exception:
+                pass
+
+        def _safe_lower(item_id: int) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.tag_lower(item_id)
+            except Exception:
+                pass
+
+        def _safe_raise(item_id: int, above: int | None = None) -> None:
+            try:
+                if not _item_exists(item_id):
+                    return
+                if above is not None and _item_exists(above):
+                    c.tag_raise(item_id, above)
+                else:
+                    c.tag_raise(item_id)
+            except Exception:
+                pass
+
+        def _safe_coords(item_id: int, *coords: int) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.coords(item_id, *coords)
+            except Exception:
+                pass
+
+        def _safe_itemconfigure(item_id: int, **kwargs) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.itemconfigure(item_id, **kwargs)
+            except Exception:
+                pass
+
+        is_selected = path in set(self.selected_paths)
+
+        row_h = int(c.cget("height"))
+        pad_x = 10
+        pad_y = 4
+        radius = 8
+        gap = 12
+
+        # Columns (right-aligned): remove | size | mime | ext
+        ext_w = int(self._min_ext_px)
+        mime_w = int(self._min_mime_px)
+        size_w = int(self._min_size_px)
+        remove_w = int(self._min_remove_px)
+
+        ext_left = max(pad_x, width - pad_x - ext_w)
+        mime_left = max(pad_x, ext_left - gap - mime_w)
+        size_left = max(pad_x, mime_left - gap - size_w)
+        remove_left = max(pad_x, size_left - gap - remove_w)
+
+        name_x = pad_x + 10
+        name_right = max(name_x + 60, remove_left - gap)
+        name_w = max(60, name_right - name_x)
+
+        # Progress value (drawn as an inset rounded bar, not as a full-row background)
+        real_p = float(self._progress.get(path, 0.0))
+        disp_p = float(self._display_progress.get(path, real_p))
+        p = max(0.0, min(1.0, disp_p))
+
+        # Selection shape (blue highlight)
+        sel_id = row.get("sel")
+        if isinstance(sel_id, int):
+            _safe_delete(sel_id)
+            row.pop("sel", None)
+        if is_selected:
+            sel_id = self._rounded_rect(
+                c,
+                pad_x,
+                pad_y,
+                max(pad_x + 1, width - pad_x),
+                max(pad_y + 1, row_h - pad_y),
+                radius,
+                fill=self._result_selected_bg,
+                outline="",
+            )
+            row["sel"] = sel_id
+            # Keep it behind the progress/text layers.
+            if isinstance(sel_id, int):
+                _safe_lower(sel_id)
+
+        # Progress bar (green), same geometry as the rounded selection.
+        prog_id = row.get("prog")
+        if isinstance(prog_id, int):
+            _safe_delete(prog_id)
+            row.pop("prog", None)
+
+        if p > 0.0:
+            inner_left = pad_x
+            inner_top = pad_y
+            inner_right = max(inner_left + 1, width - pad_x)
+            inner_bottom = max(inner_top + 1, row_h - pad_y)
+
+            track_w = max(0, inner_right - inner_left)
+            fill_w = int(track_w * p)
+            if fill_w > 0 and track_w > 0:
+                # Tk canvas has no alpha; simulate ~50% opacity by blending.
+                base = self._result_selected_bg if is_selected else self._normal_bg
+                opacity = 0.8 if is_selected else 1
+                fill_color = self._blend_hex(self._progress_bg, base, opacity)
+                r = min(radius, int(fill_w / 2), int((inner_bottom - inner_top) / 2))
+                prog_id = self._rounded_rect(
+                    c,
+                    inner_left,
+                    inner_top,
+                    inner_left + fill_w,
+                    inner_bottom,
+                    r,
+                    fill=fill_color,
+                    outline="",
+                )
+                row["prog"] = prog_id
+                if isinstance(sel_id, int):
+                    if isinstance(prog_id, int):
+                        _safe_raise(prog_id, sel_id)
+
+        # Text colors
+        if is_selected:
+            name_color = self._result_selected_text
+            muted = self._result_selected_text
+        else:
+            name_color = self._result_text
+            muted = self._result_muted
+
+        name = self._ellipsize(dropped.name, name_w - 10)
+        size_txt = _human_size(dropped.size_bytes)
+        mime_txt = self._ellipsize(dropped.mime, mime_w - 10)
+        ext_txt = dropped.ext
+
+        # Update canvas items
+        t_name = row.get("t_name")
+        t_size = row.get("t_size")
+        t_mime = row.get("t_mime")
+        t_ext = row.get("t_ext")
+        img_remove = row.get("i_remove")
+
+        if isinstance(t_name, int):
+            _safe_coords(t_name, name_x, int(row_h / 2))
+            _safe_itemconfigure(t_name, text=name, fill=name_color)
+        if isinstance(t_size, int):
+            _safe_coords(t_size, size_left + size_w, int(row_h / 2))
+            _safe_itemconfigure(t_size, text=size_txt, fill=muted)
+        if isinstance(t_mime, int):
+            _safe_coords(t_mime, mime_left + mime_w, int(row_h / 2))
+            _safe_itemconfigure(t_mime, text=mime_txt, fill=muted)
+        if isinstance(t_ext, int):
+            _safe_coords(t_ext, ext_left + ext_w, int(row_h / 2))
+            _safe_itemconfigure(t_ext, text=ext_txt, fill=muted)
+        if isinstance(img_remove, int):
+            _safe_coords(img_remove, remove_left + int(remove_w / 2), int(row_h / 2))
+
+        # Keep foreground items above progress/selection.
+        for key in ("t_name", "t_size", "t_mime", "t_ext", "i_remove"):
+            item = row.get(key)
+            if isinstance(item, int):
+                _safe_raise(item)
+
+        # Separator line
+        sep = row.get("sep")
+        if isinstance(sep, int):
+            _safe_coords(sep, pad_x, row_h - 1, width - pad_x, row_h - 1)
+
+    @staticmethod
+    def _blend_hex(fg: str, bg: str, alpha: float) -> str:
+        """Blend fg over bg with alpha in [0..1] and return #RRGGBB."""
+
+        def _parse(h: str) -> tuple[int, int, int]:
+            s = h.strip()
+            if s.startswith("#"):
+                s = s[1:]
+            if len(s) != 6:
+                return (0, 0, 0)
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+        a = max(0.0, min(1.0, float(alpha)))
+        fr, fg_g, fb = _parse(fg)
+        br, bg_g, bb = _parse(bg)
+
+        r = int(round(fr * a + br * (1.0 - a)))
+        g = int(round(fg_g * a + bg_g * (1.0 - a)))
+        b = int(round(fb * a + bb * (1.0 - a)))
+        return f"#{r:02x}{g:02x}{b:02x}"
 
     def _selection_colors(self) -> tuple[str, str]:
         # Prefer themed selection background.
@@ -436,6 +651,15 @@ class ConvertableApp:
         if not widgets:
             return
 
+        # Canvas-based Convert rows (Finder-like styling)
+        c = widgets.get("canvas")
+        if isinstance(c, tkinter.Canvas):
+            width = self.convert_canvas.winfo_width() if hasattr(self, "convert_canvas") else 0
+            if width <= 0:
+                width = 900
+            self._render_convert_row(widgets, width)
+            return
+
         row = widgets.get("row")
         if not isinstance(row, tkinter.Frame):
             return
@@ -471,7 +695,10 @@ class ConvertableApp:
 
         # Avoid the lingering 1px sliver at 0% by hiding the fill.
         if isinstance(fill, tkinter.Frame):
-            if filled_px <= 0:
+            if is_selected:
+                # Selection highlight takes precedence over progress fill.
+                fill.place_forget()
+            elif filled_px <= 0:
                 fill.place_forget()
             else:
                 fill.configure(bg=self._progress_bg)
@@ -882,119 +1109,71 @@ class ConvertableApp:
         self.selected_paths = [p for p in self.selected_paths if p in remaining]
 
         for row_idx, f in enumerate(self.dropped):
-            row = tkinter.Frame(self.convert_list_frame, bg=self._normal_bg)
-            row.grid(row=row_idx, column=0, sticky="ew")
-            # Columns: 0 name_group | 1 spacer(expands) | 2 remove | 3 size | 4 mime | 5 ext
-            row.columnconfigure(1, weight=1)
-            row.columnconfigure(2, minsize=self._min_remove_px)
-            row.columnconfigure(3, minsize=self._min_size_px)
-            row.columnconfigure(4, minsize=self._min_mime_px)
-            row.columnconfigure(5, minsize=self._min_ext_px)
-
-            # Name group (filename only)
-            name_group = tkinter.Frame(row, bg=self._normal_bg)
-            name_group.grid(row=0, column=0, sticky="w", padx=(12, 6), pady=6)
-
-            # Progress fill (behind content)
-            progress_fill = tkinter.Frame(row, bg=self._progress_bg)
-            progress_fill.place(x=0, y=0, relheight=1.0, width=0)
-            progress_fill.lower()
-
-            name_label = tkinter.Label(
-                name_group,
-                text=f.name,
-                anchor="w",
+            row_h = 34
+            c = tkinter.Canvas(
+                self.convert_list_frame,
+                height=row_h,
+                highlightthickness=0,
+                bd=0,
                 bg=self._normal_bg,
-                fg=self._convert_text,
-                font=self.font_normal,
             )
-            name_label.pack(side="left")
+            c.grid(row=row_idx, column=0, sticky="ew")
 
-            # Spacer column takes remaining width so stats stay visible.
-            spacer = tkinter.Label(row, text="", bg=self._normal_bg, fg=self._convert_text)
-            spacer.grid(row=0, column=1, sticky="ew")
+            # Progress bar is drawn as a rounded shape during rendering (so it animates smoothly
+            # and stays clipped to the rounded bounds). Placeholder id stored in the row dict.
+            prog_id: int | None = None
 
-            # Remove icon sits right before size (aligned with stats)
-            remove_label = tkinter.Label(row, image=self.remove_icon, bg=self._normal_bg)
-            remove_label.grid(row=0, column=2, sticky="e", padx=(0, 12), pady=6)
-            remove_label.bind("<Button-1>", lambda _e, p=f.path: (self._remove_paths({p}), "break")[1])
+            # Text + icon items (positions set in _render_convert_row)
+            t_name = c.create_text(0, int(row_h / 2), text=f.name, anchor="w", fill=self._result_text, font=self.font_normal)
+            t_size = c.create_text(0, int(row_h / 2), text=_human_size(f.size_bytes), anchor="e", fill=self._result_muted, font=self.font_normal)
+            t_mime = c.create_text(0, int(row_h / 2), text=f.mime, anchor="e", fill=self._result_muted, font=self.font_normal)
+            t_ext = c.create_text(0, int(row_h / 2), text=f.ext, anchor="e", fill=self._result_muted, font=self.font_normal)
+            i_remove = c.create_image(0, int(row_h / 2), image=self.remove_icon)
+            c.itemconfigure(i_remove, tags=("remove",))
 
-            size_label = tkinter.Label(
-                row,
-                text=_human_size(f.size_bytes),
-                anchor="e",
-                bg=self._normal_bg,
-                fg=self._convert_muted,
-                font=self.font_normal,
-            )
-            size_label.grid(row=0, column=3, sticky="e", padx=(0, 12), pady=6)
+            sep = c.create_line(10, row_h - 1, 10, row_h - 1, fill="#2c2c2e")
 
-            mime_label = tkinter.Label(
-                row,
-                text=f.mime,
-                anchor="w",
-                bg=self._normal_bg,
-                fg=self._convert_muted,
-                font=self.font_normal,
-            )
-            mime_label.configure(anchor="e")
-            mime_label.grid(row=0, column=4, sticky="e", padx=(0, 12), pady=6)
-
-            ext_label = tkinter.Label(
-                row,
-                text=f.ext,
-                anchor="e",
-                bg=self._normal_bg,
-                fg=self._convert_muted,
-                font=self.font_normal,
-            )
-            ext_label.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=6)
-
-            # Click anywhere on row (except the remove icon) to select.
-            def _row_click(ev, p=f.path) -> None:
+            def _row_click(ev, p=f.path) -> str | None:
+                # Ignore clicks on the remove icon.
+                try:
+                    current = ev.widget.find_withtag("current")
+                    if current and "remove" in ev.widget.gettags(current[0]):
+                        return "break"
+                except Exception:
+                    pass
                 self._on_row_click(ev, p)
+                return "break"
 
-            row.bind("<Button-1>", _row_click)
-            name_label.bind("<Button-1>", _row_click)
-            size_label.bind("<Button-1>", _row_click)
-            mime_label.bind("<Button-1>", _row_click)
-            ext_label.bind("<Button-1>", _row_click)
-            spacer.bind("<Button-1>", _row_click)
+            def _remove_click(_ev, p=f.path) -> str:
+                self._remove_paths({p})
+                return "break"
 
-            # Right-click context menu
-            def _ctx(ev, p=f.path) -> None:
+            def _ctx(ev, p=f.path) -> str:
                 self._show_convert_context_menu(ev, p)
+                return "break"
 
-            row.bind("<Button-3>", _ctx)
-            row.bind("<Button-2>", _ctx)
-            name_label.bind("<Button-3>", _ctx)
-            name_label.bind("<Button-2>", _ctx)
-            size_label.bind("<Button-3>", _ctx)
-            size_label.bind("<Button-2>", _ctx)
-            mime_label.bind("<Button-3>", _ctx)
-            mime_label.bind("<Button-2>", _ctx)
-            ext_label.bind("<Button-3>", _ctx)
-            ext_label.bind("<Button-2>", _ctx)
-            spacer.bind("<Button-3>", _ctx)
-            spacer.bind("<Button-2>", _ctx)
+            c.bind("<Button-1>", _row_click)
+            c.tag_bind("remove", "<Button-1>", _remove_click)
+
+            c.bind("<Button-3>", _ctx)
+            c.bind("<Button-2>", _ctx)
 
             self._convert_rows[f.path] = {
-                "row": row,
-                "name": name_label,
-                "remove": remove_label,
-                "name_group": name_group,
-                "spacer": spacer,
-                "size": size_label,
-                "mime": mime_label,
-                "ext": ext_label,
-                "progress_fill": progress_fill,
+                "path": f.path,
+                "canvas": c,
+                "prog": prog_id,
+                "t_name": t_name,
+                "t_size": t_size,
+                "t_mime": t_mime,
+                "t_ext": t_ext,
+                "i_remove": i_remove,
+                "sep": sep,
                 "full_name": f.name,
             }
 
         self._update_convert_selection_ui()
-        # Apply initial clipping based on current width.
         self.convert_canvas.update_idletasks()
-        self._update_name_clipping(self.convert_canvas.winfo_width())
+        self._layout_convert_rows(self.convert_canvas.winfo_width())
         self.convert_canvas.configure(scrollregion=self.convert_canvas.bbox("all"))
 
         self._refresh_row_visuals()
@@ -1026,10 +1205,15 @@ class ConvertableApp:
         if not widgets:
             return
         row = widgets.get("row")
-        if not isinstance(row, ttk.Frame):
-            return
+        if isinstance(row, tkinter.Frame):
+            target = row
+        else:
+            c = widgets.get("canvas")
+            if not isinstance(c, tkinter.Canvas):
+                return
+            target = c
         self.convert_canvas.update_idletasks()
-        y = row.winfo_y()
+        y = target.winfo_y()
         height = max(1, self.convert_list_frame.winfo_height())
         self.convert_canvas.yview_moveto(y / height)
 
