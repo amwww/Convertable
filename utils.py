@@ -6,6 +6,7 @@ import select
 import sys
 import tempfile
 from pathlib import Path
+import threading
 import filetype as ft
 from PIL import Image, UnidentifiedImageError
 from pydub import AudioSegment
@@ -13,6 +14,44 @@ from moviepy.editor import VideoFileClip
 from typing import Callable
 
 ProgressCallback = Callable[[float], None]
+CancelCallback = Callable[[], bool]
+
+_ACTIVE_PROCS: set[subprocess.Popen] = set()
+_ACTIVE_PROCS_LOCK = threading.Lock()
+
+
+def _register_active_proc(proc: subprocess.Popen) -> None:
+    try:
+        with _ACTIVE_PROCS_LOCK:
+            _ACTIVE_PROCS.add(proc)
+    except Exception:
+        pass
+
+
+def _unregister_active_proc(proc: subprocess.Popen) -> None:
+    try:
+        with _ACTIVE_PROCS_LOCK:
+            _ACTIVE_PROCS.discard(proc)
+    except Exception:
+        pass
+
+
+def terminate_active_processes() -> None:
+    """Best-effort kill of any subprocesses started for conversions (ffmpeg)."""
+    try:
+        with _ACTIVE_PROCS_LOCK:
+            procs = list(_ACTIVE_PROCS)
+    except Exception:
+        procs = []
+
+    for p in procs:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+class ConversionCancelled(RuntimeError):
+    pass
 
 class FileConverter:
     def __init__(self, outputPath: str):
@@ -34,8 +73,16 @@ class FileConverter:
                 return cand
             n += 1
 
-    def convertImage(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
+    def convertImage(
+        self,
+        inputFile: str,
+        outputFiletype: str,
+        progress: ProgressCallback | None = None,
+        cancel: CancelCallback | None = None,
+    ) -> str:
         self.ensureOutputPath()
+        if cancel and cancel():
+            raise ConversionCancelled("Conversion cancelled")
         if progress:
             progress(0.1)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
@@ -48,6 +95,8 @@ class FileConverter:
 
         try:
             with Image.open(inputFile) as img:
+                if cancel and cancel():
+                    raise ConversionCancelled("Conversion cancelled")
                 _save_from_pil(img)
         except (UnidentifiedImageError, OSError):
             # Pillow doesn't support HEIC/HEIF by default.
@@ -57,6 +106,8 @@ class FileConverter:
                 if progress:
                     progress(0.2)
                 with tempfile.TemporaryDirectory(prefix="convertable-heic-") as td:
+                    if cancel and cancel():
+                        raise ConversionCancelled("Conversion cancelled")
                     tmp_png = os.path.join(td, "_convertable_input.png")
                     proc = subprocess.run(
                         ["sips", "-s", "format", "png", inputFile, "--out", tmp_png],
@@ -72,6 +123,8 @@ class FileConverter:
                     if progress:
                         progress(0.45)
                     with Image.open(tmp_png) as img:
+                        if cancel and cancel():
+                            raise ConversionCancelled("Conversion cancelled")
                         _save_from_pil(img)
             else:
                 raise
@@ -81,8 +134,16 @@ class FileConverter:
 
         return outputFile
 
-    def convertAudio(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
+    def convertAudio(
+        self,
+        inputFile: str,
+        outputFiletype: str,
+        progress: ProgressCallback | None = None,
+        cancel: CancelCallback | None = None,
+    ) -> str:
         self.ensureOutputPath()
+        if cancel and cancel():
+            raise ConversionCancelled("Conversion cancelled")
         if progress:
             progress(0.02)
 
@@ -124,15 +185,23 @@ class FileConverter:
             outputFile,
         ]
 
-        self._run_ffmpeg_with_progress(cmd, duration, progress)
+        self._run_ffmpeg_with_progress(cmd, duration, progress, cancel=cancel)
 
         if progress:
             progress(1.0)
 
         return outputFile
 
-    def convertVideo(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
+    def convertVideo(
+        self,
+        inputFile: str,
+        outputFiletype: str,
+        progress: ProgressCallback | None = None,
+        cancel: CancelCallback | None = None,
+    ) -> str:
         self.ensureOutputPath()
+        if cancel and cancel():
+            raise ConversionCancelled("Conversion cancelled")
         if progress:
             progress(0.02)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
@@ -178,9 +247,11 @@ class FileConverter:
                 "-nostats",
                 outputFile,
             ]
-            self._run_ffmpeg_with_progress(cmd, duration, progress)
+            self._run_ffmpeg_with_progress(cmd, duration, progress, cancel=cancel)
         else:
             # Fallback for other formats.
+            if cancel and cancel():
+                raise ConversionCancelled("Conversion cancelled")
             with VideoFileClip(inputFile) as clip:
                 clip.write_videofile(outputFile, ffmpeg_params=["-y"])
 
@@ -234,7 +305,13 @@ class FileConverter:
         except Exception:
             return None
 
-    def _run_ffmpeg_with_progress(self, cmd: list[str], duration_s: float | None, progress: ProgressCallback | None) -> None:
+    def _run_ffmpeg_with_progress(
+        self,
+        cmd: list[str],
+        duration_s: float | None,
+        progress: ProgressCallback | None,
+        cancel: CancelCallback | None = None,
+    ) -> None:
         def _parse_hhmmss(s: str) -> float | None:
             try:
                 parts = s.split(":")
@@ -252,6 +329,7 @@ class FileConverter:
 
         # Important: merge stderr into stdout to avoid deadlocks (stderr can fill its buffer).
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        _register_active_proc(proc)
         assert proc.stdout is not None
 
         output_tail: list[str] = []
@@ -280,6 +358,12 @@ class FileConverter:
                 log_fp = None
 
             while True:
+                if cancel and cancel():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    raise ConversionCancelled("Conversion cancelled")
                 if proc.poll() is not None:
                     break
 
@@ -422,6 +506,7 @@ class FileConverter:
                 tail = "\n".join(output_tail[-20:]).strip()
                 raise RuntimeError(tail or f"ffmpeg failed with exit code {rc}\n\nffmpeg log: {log_path}")
         finally:
+            _unregister_active_proc(proc)
             if log_fp is not None:
                 try:
                     log_fp.write(f"EXIT_CODE={proc.poll()}\n")
@@ -430,7 +515,13 @@ class FileConverter:
                 except Exception:
                     pass
 
-    def convertFile(self, inputFile: str, outputFiletype: str, progress: ProgressCallback | None = None) -> str:
+    def convertFile(
+        self,
+        inputFile: str,
+        outputFiletype: str,
+        progress: ProgressCallback | None = None,
+        cancel: CancelCallback | None = None,
+    ) -> str:
         kind = ft.guess(inputFile)
         if kind is None:
             raise ValueError("Could not detect input file type.")
@@ -455,15 +546,21 @@ class FileConverter:
             )
 
         if inputCategory == "image":
-            return self.convertImage(inputFile, outputExt, progress=progress)
+            return self.convertImage(inputFile, outputExt, progress=progress, cancel=cancel)
         if inputCategory == "audio":
-            return self.convertAudio(inputFile, outputExt, progress=progress)
+            return self.convertAudio(inputFile, outputExt, progress=progress, cancel=cancel)
         if inputCategory == "video":
-            return self.convertVideo(inputFile, outputExt, progress=progress)
+            return self.convertVideo(inputFile, outputExt, progress=progress, cancel=cancel)
 
         raise ValueError("Conversion category not implemented.")
 
-def convertFile(inputFile: str, outputFiletype: str, outputPath: str, progress: ProgressCallback | None = None) -> str:
+def convertFile(
+    inputFile: str,
+    outputFiletype: str,
+    outputPath: str,
+    progress: ProgressCallback | None = None,
+    cancel: CancelCallback | None = None,
+) -> str:
     """Convenience wrapper for one-off conversions."""
     converter = FileConverter(outputPath)
-    return converter.convertFile(inputFile, outputFiletype, progress=progress)
+    return converter.convertFile(inputFile, outputFiletype, progress=progress, cancel=cancel)

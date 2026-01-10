@@ -117,6 +117,7 @@ class ConvertableApp:
         self._pending_tasks: list[tuple[str, str]] = []
         self._pending_cv = threading.Condition()
         self._ui_events: queue.Queue[tuple] = queue.Queue()
+        self._shutdown = threading.Event()
         self._in_progress: set[str] = set()
         self._progress: dict[str, float] = {}
         self._display_progress: dict[str, float] = {}
@@ -124,6 +125,14 @@ class ConvertableApp:
         self._animate_active: bool = False
         self._last_progress_ts: dict[str, float] = {}
         self._job_started_ts: dict[str, float] = {}
+
+        # Parallel execution control (sequential by default).
+        self._parallel_limit: int = 1
+        self._active_conversions: int = 0
+        # One-shot parallel: enabled when user drops onto the current job.
+        # Reverts to sequential as soon as one of the parallel jobs finishes.
+        self._parallel_one_shot: bool = False
+        self._parallel_engaged: bool = False
 
         # Queue/Job card state
         self._job_bar_collapsed: bool = False
@@ -137,6 +146,7 @@ class ConvertableApp:
         self._queue_drag_to: int | None = None
         self._queue_drag_ghost: list[int] = []
         self._queue_drag_ghost_text: str = ""
+        self._queue_drag_over_current: bool = False
 
         # Converted outputs are written to a temporary session folder first.
         # They only get copied to the user's disk output folder when they click Save.
@@ -186,7 +196,9 @@ class ConvertableApp:
         self._selection_anchor: str | None = None
         self._convert_rows: dict[str, dict[str, object]] = {}
 
-        self._worker = threading.Thread(target=self._conversion_worker, daemon=True)
+        # One always-on worker; an extra worker is spawned on-demand for parallel mode.
+        self._worker: threading.Thread = threading.Thread(target=self._conversion_worker, daemon=True)
+        self._extra_worker: threading.Thread | None = None
         self._worker.start()
         self.root.after(60, self._process_ui_events)
 
@@ -245,6 +257,23 @@ class ConvertableApp:
     def _on_close(self) -> None:
         try:
             self._debug_log("App closing")
+            try:
+                self._shutdown.set()
+            except Exception:
+                pass
+
+            # Kill any active ffmpeg processes promptly.
+            try:
+                utils.terminate_active_processes()
+            except Exception:
+                pass
+
+            # Wake workers so they can notice shutdown.
+            try:
+                with self._pending_cv:
+                    self._pending_cv.notify_all()
+            except Exception:
+                pass
             shutil.rmtree(self._session_output_dir, ignore_errors=True)
         finally:
             self.root.destroy()
@@ -1019,7 +1048,7 @@ class ConvertableApp:
             self._job_started_ts[src_path] = now
             with self._pending_cv:
                 self._pending_tasks.append((src_path, target_ext))
-                self._pending_cv.notify()
+                self._pending_cv.notify_all()
 
             # Queue stats tracking
             self._queue_paths.add(src_path)
@@ -1330,17 +1359,19 @@ class ConvertableApp:
             _safe_coords(sep, pad_l, row_h - 1, width - bar_pad_r, row_h - 1)
 
     def _sync_queue_order_for_processing(self) -> None:
-        """Keep _queue_order aligned to actual processing order: current first, then pending."""
+        """Keep _queue_order aligned to actual processing order: running first, then pending."""
         try:
             with self._pending_cv:
                 pending_paths = [p for (p, _t) in self._pending_tasks]
         except Exception:
             pending_paths = []
 
-        cur = self._current_job_path
+        running_paths = [p for p in self._queue_order if p in self._in_progress and p not in pending_paths]
+
         order: list[str] = []
-        if cur:
-            order.append(str(cur))
+        for p in running_paths:
+            if p not in order:
+                order.append(p)
         for p in pending_paths:
             if p not in order:
                 order.append(p)
@@ -1352,27 +1383,56 @@ class ConvertableApp:
 
         self._queue_order = order
 
+        # First running item is treated as the "current" row.
+        self._current_job_path = running_paths[0] if running_paths else None
+
     def _queue_display_items(self) -> list[tuple[str, str, str]]:
-        """Return (src_path, target_ext, status) in processing order (current first)."""
+        """Return (src_path, target_ext, status) in processing order (running first)."""
         items: list[tuple[str, str, str]] = []
-
-        cur = self._current_job_path
-        if cur:
-            tgt = self._target_by_path.get(str(cur), self._current_job_target or "")
-            items.append((str(cur), str(tgt or ""), "Converting"))
-
         try:
             with self._pending_cv:
                 pending = list(self._pending_tasks)
         except Exception:
             pending = []
 
+        pending_paths = [p for (p, _t) in pending]
+        running_paths = [p for p in self._queue_order if p in self._in_progress and p not in pending_paths]
+
+        for p in running_paths:
+            tgt = self._target_by_path.get(str(p), "")
+            frac = float(self._display_progress.get(p, self._progress.get(p, 0.0)))
+            frac = max(0.0, min(1.0, frac))
+            pct = int(frac * 100.0)
+            items.append((str(p), str(tgt or ""), f"Converting · {pct}%"))
+
         for src, tgt in pending:
-            if cur and str(src) == str(cur):
-                continue
             items.append((str(src), str(tgt), "Queued"))
 
         return items
+
+    def _enable_parallel_for_batch(self) -> None:
+        """Enable 2-way parallel processing for the current batch."""
+        try:
+            extra_to_start: threading.Thread | None = None
+            with self._pending_cv:
+                if self._parallel_limit < 2:
+                    self._parallel_limit = 2
+                self._parallel_one_shot = True
+                self._parallel_engaged = False
+
+                if self._extra_worker is None or (not self._extra_worker.is_alive()):
+                    extra_to_start = threading.Thread(
+                        target=self._conversion_worker,
+                        kwargs={"is_extra": True},
+                        daemon=True,
+                    )
+                    self._extra_worker = extra_to_start
+                self._pending_cv.notify_all()
+
+            if extra_to_start is not None:
+                extra_to_start.start()
+        except Exception:
+            pass
 
     def _queue_drag_ghost_clear(self) -> None:
         canvas = getattr(self, "queue_canvas", None)
@@ -1529,7 +1589,11 @@ class ConvertableApp:
         except Exception:
             pending_paths = []
 
-        if len(pending_paths) <= 1:
+        # Allow dragging a single pending item when there is a running "current" job,
+        # so the user can drop it onto the current row to trigger parallel mode.
+        has_running_current = bool(self._current_job_path and (str(self._current_job_path) in self._in_progress))
+
+        if len(pending_paths) == 0 or (len(pending_paths) == 1 and not has_running_current):
             # Nothing meaningful to reorder.
             try:
                 self.root.bell()
@@ -1546,6 +1610,7 @@ class ConvertableApp:
 
         self._queue_drag_from = pending_paths.index(str(path))
         self._queue_drag_to = self._queue_drag_from
+        self._queue_drag_over_current = False
 
         self._debug_log(f"QUEUE DRAG start: path={path} from={self._queue_drag_from} pending_len={len(pending_paths)}")
 
@@ -1614,12 +1679,18 @@ class ConvertableApp:
         row_h = 34
         display_idx = max(0, int(y_canvas // row_h))
 
-        offset = 1 if self._current_job_path else 0
         try:
             with self._pending_cv:
-                pending_len = len(self._pending_tasks)
+                pending_paths = [p for (p, _t) in self._pending_tasks]
+                pending_len = len(pending_paths)
         except Exception:
+            pending_paths = []
             pending_len = 0
+
+        running_paths = [p for p in self._queue_order if p in self._in_progress and p not in pending_paths]
+        offset = len(running_paths)
+        # Only the first running row is considered the "current" row.
+        self._queue_drag_over_current = bool(offset >= 1 and display_idx == 0)
         if pending_len <= 0:
             return
 
@@ -1671,8 +1742,10 @@ class ConvertableApp:
 
         from_idx = self._queue_drag_from
         to_idx = self._queue_drag_to
+        over_current = bool(self._queue_drag_over_current)
         self._queue_drag_from = None
         self._queue_drag_to = None
+        self._queue_drag_over_current = False
         self._queue_drag_ghost_clear()
         if from_idx is None:
             return
@@ -1680,7 +1753,12 @@ class ConvertableApp:
             return
 
         # Motion already performed live reorders; drop just finalizes.
-        self._debug_log(f"QUEUE DRAG drop: to={to_idx}")
+        self._debug_log(f"QUEUE DRAG drop: to={to_idx} over_current={over_current}")
+
+        # If user dropped onto the current row, interpret as "run this next".
+        # With parallel workers, this means "start this in parallel".
+        if over_current:
+            self._enable_parallel_for_batch()
 
     # -------------------- Result Tab --------------------
     def _build_result_tab(self) -> None:
@@ -2371,6 +2449,16 @@ class ConvertableApp:
         failed = len(self._queue_failed)
         running = len(self._in_progress)
 
+        try:
+            with self._pending_cv:
+                pending_count = len(self._pending_tasks)
+                active_workers = int(self._active_conversions)
+                worker_limit = int(self._parallel_limit)
+        except Exception:
+            pending_count = 0
+            active_workers = running
+            worker_limit = 1
+
         overall = 0.0
         if total:
             overall = sum(float(self._display_progress.get(p, self._progress.get(p, 0.0))) for p in self._queue_paths) / float(total)
@@ -2433,6 +2521,11 @@ class ConvertableApp:
                 stats += f" · Failed: {failed}"
             if running:
                 stats += f" · In progress: {running}"
+            if pending_count:
+                stats += f" · Pending: {pending_count}"
+            if running or pending_count:
+                mode = "Parallel" if worker_limit > 1 else "Sequential"
+                stats += f" · Workers: {active_workers}/{worker_limit} ({mode})"
             if total_bytes > 0:
                 stats += f" · Data: {_human_size(done_bytes)}/{_human_size(total_bytes)}"
             stats_text = stats
@@ -2442,6 +2535,8 @@ class ConvertableApp:
                 if cur_idx is not None:
                     cur_txt += f" ({cur_idx}/{total})"
                 cur_txt += f" · {_pct(cur_p)}"
+                if running > 1:
+                    cur_txt += f" · +{running - 1} more"
                 if cur_p >= 0.90 and age_s >= 10:
                     cur_txt += f" · Finalizing (no new progress {age_s}s)"
                 current_text = cur_txt
@@ -2521,12 +2616,34 @@ class ConvertableApp:
             # Keep the loop alive even after an error.
             self.root.after(120, self._tick_progress_animation)
 
-    def _conversion_worker(self) -> None:
+    def _conversion_worker(self, is_extra: bool = False) -> None:
         while True:
             with self._pending_cv:
-                while not self._pending_tasks:
+                while True:
+                    if self._shutdown.is_set():
+                        try:
+                            who = "extra" if is_extra else "primary"
+                            self._debug_log(f"WORKER {who} exit: shutdown")
+                        except Exception:
+                            pass
+                        return
+
+                    # Extra worker self-terminates whenever we return to sequential mode.
+                    if is_extra and self._parallel_limit <= 1:
+                        try:
+                            self._debug_log("WORKER extra exit: sequential mode")
+                        except Exception:
+                            pass
+                        return
+
+                    if self._pending_tasks and (self._active_conversions < self._parallel_limit):
+                        src_path, target_ext = self._pending_tasks.pop(0)
+                        self._active_conversions += 1
+                        if self._parallel_limit > 1 and self._parallel_one_shot and self._active_conversions >= 2:
+                            self._parallel_engaged = True
+                        break
+
                     self._pending_cv.wait()
-                src_path, target_ext = self._pending_tasks.pop(0)
             try:
                 self._ui_events.put(("start", src_path, target_ext))
                 # Predict output paths so the user can find ffmpeg logs even if the job hangs.
@@ -2560,12 +2677,42 @@ class ConvertableApp:
                         last_log_t = now
                         self._debug_log(f"WORKER progress: src={src_path} v={vv:.3f}")
 
-                out_path = utils.convertFile(src_path, target_ext, self._output_dir, progress=_progress_cb)
+                cancel_cb = (lambda: bool(self._shutdown.is_set()))
+                out_path = utils.convertFile(src_path, target_ext, self._output_dir, progress=_progress_cb, cancel=cancel_cb)
                 self._ui_events.put(("done", src_path, out_path, target_ext))
                 self._debug_log(f"WORKER done: src={src_path} out={out_path}")
+            except utils.ConversionCancelled as e:
+                # During shutdown, treat cancellations as a clean exit path.
+                if self._shutdown.is_set():
+                    self._debug_log(f"WORKER cancelled during shutdown: src={src_path} msg={e}")
+                    return
+                self._ui_events.put(("error", src_path, str(e)))
             except Exception as e:
                 self._ui_events.put(("error", src_path, str(e)))
                 self._debug_log(f"WORKER error: src={src_path} err={e}")
+            finally:
+                try:
+                    with self._pending_cv:
+                        self._active_conversions = max(0, int(self._active_conversions) - 1)
+
+                        # One-shot parallel ends as soon as one of the parallel jobs finishes,
+                        # leaving at most one active conversion.
+                        if (
+                            self._parallel_limit > 1
+                            and self._parallel_one_shot
+                            and self._parallel_engaged
+                            and int(self._active_conversions) <= 1
+                        ):
+                            self._parallel_limit = 1
+                            self._parallel_one_shot = False
+                            self._parallel_engaged = False
+                            try:
+                                self._debug_log("PARALLEL one-shot ended; reverting to sequential")
+                            except Exception:
+                                pass
+                        self._pending_cv.notify_all()
+                except Exception:
+                    pass
 
     def _process_ui_events(self) -> None:
         try:
@@ -2579,7 +2726,6 @@ class ConvertableApp:
                 kind = evt[0]
                 if kind == "start":
                     _k, path, target_ext = evt
-                    self._current_job_path = str(path)
                     self._current_job_target = str(target_ext)
                     self._sync_queue_order_for_processing()
                     changed = True
@@ -2629,26 +2775,40 @@ class ConvertableApp:
                     name = Path(path).name
                     msg = str(_msg).strip() or "Unknown error"
                     self._debug_log(f"UI error: src={path} msg={msg}")
-                    # Show an error dialog so "freezes" are diagnosable.
-                    try:
-                        messagebox.showerror(
-                            "Conversion failed",
-                            f"{name}\n\n{msg}\n\nDebug log: {self._debug_log_path}",
-                        )
-                    except Exception:
-                        # If the dialog fails for any reason, still emit to console.
-                        pass
-                    print(f"[Convertable] Conversion failed: {name}\n{msg}")
+                    # During shutdown, suppress dialogs for cancelled/terminated conversions.
+                    if not self._shutdown.is_set():
+                        # Show an error dialog so "freezes" are diagnosable.
+                        try:
+                            messagebox.showerror(
+                                "Conversion failed",
+                                f"{name}\n\n{msg}\n\nDebug log: {self._debug_log_path}",
+                            )
+                        except Exception:
+                            # If the dialog fails for any reason, still emit to console.
+                            pass
+                        print(f"[Convertable] Conversion failed: {name}\n{msg}")
                     changed = True
 
             if changed:
                 self._refresh_convert_progress()
                 self._refresh_queue_list()
                 self._update_job_bar()
+
+                # When a batch completes, revert to sequential mode.
+                try:
+                    with self._pending_cv:
+                        if not self._in_progress and not self._pending_tasks:
+                            self._parallel_limit = 1
+                            self._parallel_one_shot = False
+                            self._parallel_engaged = False
+                            self._pending_cv.notify_all()
+                except Exception:
+                    pass
         except Exception as e:
             self._on_tk_exception(type(e), e, e.__traceback__)
         finally:
-            self.root.after(60, self._process_ui_events)
+            if not self._shutdown.is_set():
+                self.root.after(60, self._process_ui_events)
 
     def _on_tk_exception(self, exc, val, tb) -> None:
         try:
