@@ -135,6 +135,8 @@ class ConvertableApp:
         self._current_job_target: str | None = None
         self._queue_drag_from: int | None = None
         self._queue_drag_to: int | None = None
+        self._queue_drag_ghost: list[int] = []
+        self._queue_drag_ghost_text: str = ""
 
         # Converted outputs are written to a temporary session folder first.
         # They only get copied to the user's disk output folder when they click Save.
@@ -1372,6 +1374,87 @@ class ConvertableApp:
 
         return items
 
+    def _queue_drag_ghost_clear(self) -> None:
+        canvas = getattr(self, "queue_canvas", None)
+        if not isinstance(canvas, tkinter.Canvas):
+            self._queue_drag_ghost = []
+            self._queue_drag_ghost_text = ""
+            return
+        try:
+            for it in list(self._queue_drag_ghost):
+                try:
+                    canvas.delete(it)
+                except Exception:
+                    pass
+        finally:
+            self._queue_drag_ghost = []
+            self._queue_drag_ghost_text = ""
+
+    def _queue_drag_ghost_show(self, text: str, y_canvas: float) -> None:
+        canvas = getattr(self, "queue_canvas", None)
+        if not isinstance(canvas, tkinter.Canvas):
+            return
+
+        row_h = 34
+        pad_l = 10
+        pad_y = 4
+        bar_pad_r = 10
+
+        try:
+            w = int(canvas.winfo_width())
+        except Exception:
+            w = 0
+        x1 = pad_l
+        x2 = max(pad_l + 1, w - bar_pad_r)
+        y1 = float(y_canvas) - (row_h / 2.0) + pad_y
+        y2 = y1 + row_h - (pad_y * 2)
+        if y2 <= y1:
+            y2 = y1 + 1
+
+        # Create once; then just move/update.
+        if not self._queue_drag_ghost:
+            try:
+                rect = canvas.create_rectangle(x1, y1, x2, y2, fill=self._result_selected_bg, outline="")
+                label = canvas.create_text(
+                    x1 + 18,
+                    (y1 + y2) / 2.0,
+                    text=text,
+                    anchor="w",
+                    fill=self._result_selected_text,
+                    font=self.font_normal,
+                )
+                self._queue_drag_ghost = [rect, label]
+                self._queue_drag_ghost_text = text
+            except Exception:
+                self._queue_drag_ghost = []
+                self._queue_drag_ghost_text = ""
+                return
+        else:
+            rect = self._queue_drag_ghost[0]
+            label = self._queue_drag_ghost[1] if len(self._queue_drag_ghost) > 1 else None
+            try:
+                canvas.coords(rect, x1, y1, x2, y2)
+            except Exception:
+                pass
+            if isinstance(label, int):
+                try:
+                    canvas.coords(label, x1 + 18, (y1 + y2) / 2.0)
+                except Exception:
+                    pass
+                if text != self._queue_drag_ghost_text:
+                    try:
+                        canvas.itemconfigure(label, text=text)
+                    except Exception:
+                        pass
+                    self._queue_drag_ghost_text = text
+
+        # Ensure it stays above the embedded list window.
+        try:
+            for it in self._queue_drag_ghost:
+                canvas.tag_raise(it)
+        except Exception:
+            pass
+
     def _refresh_queue_list(self) -> None:
         frame = getattr(self, "queue_list_frame", None)
         if not isinstance(frame, tkinter.Frame):
@@ -1446,6 +1529,17 @@ class ConvertableApp:
         except Exception:
             pending_paths = []
 
+        if len(pending_paths) <= 1:
+            # Nothing meaningful to reorder.
+            try:
+                self.root.bell()
+            except Exception:
+                pass
+            self._debug_log(f"QUEUE DRAG ignored: pending_len={len(pending_paths)}")
+            self._queue_drag_from = None
+            self._queue_drag_to = None
+            return
+
         if str(path) not in pending_paths:
             self._queue_drag_from = None
             return
@@ -1453,10 +1547,45 @@ class ConvertableApp:
         self._queue_drag_from = pending_paths.index(str(path))
         self._queue_drag_to = self._queue_drag_from
 
-        # Capture mouse globally during drag so we can track across rows.
+        self._debug_log(f"QUEUE DRAG start: path={path} from={self._queue_drag_from} pending_len={len(pending_paths)}")
+
+        # Create ghost label under the cursor.
         try:
-            self.root.bind("<B1-Motion>", self._on_queue_drag_motion)
-            self.root.bind("<ButtonRelease-1>", self._on_queue_drag_drop)
+            canvas = getattr(self, "queue_canvas", None)
+            if isinstance(canvas, tkinter.Canvas) and _event is not None:
+                y_root = getattr(_event, "y_root", None)
+                if y_root is None:
+                    y_root = self.root.winfo_pointery()
+                y = int(y_root) - int(canvas.winfo_rooty())
+                y_canvas = float(canvas.canvasy(y))
+                target = ""
+                try:
+                    with self._pending_cv:
+                        for p, t in self._pending_tasks:
+                            if p == str(path):
+                                target = str(t)
+                                break
+                except Exception:
+                    pass
+                name = Path(str(path)).name
+                ghost_txt = f"{name} → {target}" if target else name
+                self._queue_drag_ghost_show(ghost_txt, y_canvas)
+        except Exception:
+            pass
+
+        # Capture drag events during reorder.
+        try:
+            canvas = getattr(self, "queue_canvas", None)
+            if isinstance(canvas, tkinter.Canvas):
+                canvas.bind("<B1-Motion>", self._on_queue_drag_motion)
+                canvas.bind("<ButtonRelease-1>", self._on_queue_drag_drop)
+                try:
+                    canvas.grab_set_global()
+                except Exception:
+                    canvas.grab_set()
+            # Also bind globally; on some platforms the grab isn't enough.
+            self.root.bind_all("<B1-Motion>", self._on_queue_drag_motion)
+            self.root.bind_all("<ButtonRelease-1>", self._on_queue_drag_drop)
         except Exception:
             pass
 
@@ -1475,6 +1604,12 @@ class ConvertableApp:
             y_canvas = float(canvas.canvasy(y))
         except Exception:
             return
+
+        # Move ghost under cursor.
+        try:
+            self._queue_drag_ghost_show(self._queue_drag_ghost_text or "", y_canvas)
+        except Exception:
+            pass
 
         row_h = 34
         display_idx = max(0, int(y_canvas // row_h))
@@ -1496,13 +1631,41 @@ class ConvertableApp:
             to_idx = 0
         if to_idx >= pending_len:
             to_idx = pending_len - 1
-        self._queue_drag_to = to_idx
+
+        # Live reorder so it feels draggable.
+        from_idx = self._queue_drag_from
+        if to_idx != from_idx:
+            try:
+                with self._pending_cv:
+                    item = self._pending_tasks.pop(from_idx)
+                    self._pending_tasks.insert(to_idx, item)
+                self._queue_drag_from = to_idx
+                self._queue_drag_to = to_idx
+                self._sync_queue_order_for_processing()
+                self._refresh_queue_list()
+                self._update_job_bar()
+                self._debug_log(f"QUEUE DRAG move: from={from_idx} to={to_idx} pending_len={pending_len}")
+            except Exception as e:
+                self._debug_log(f"QUEUE DRAG move error: {e}")
+        else:
+            self._queue_drag_to = to_idx
 
     def _on_queue_drag_drop(self, event) -> None:
-        # Release global capture.
+        # Release capture.
         try:
-            self.root.unbind("<B1-Motion>")
-            self.root.unbind("<ButtonRelease-1>")
+            canvas = getattr(self, "queue_canvas", None)
+            if isinstance(canvas, tkinter.Canvas):
+                canvas.unbind("<B1-Motion>")
+                canvas.unbind("<ButtonRelease-1>")
+                try:
+                    canvas.grab_release()
+                except Exception:
+                    pass
+            try:
+                self.root.unbind_all("<B1-Motion>")
+                self.root.unbind_all("<ButtonRelease-1>")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1510,30 +1673,14 @@ class ConvertableApp:
         to_idx = self._queue_drag_to
         self._queue_drag_from = None
         self._queue_drag_to = None
+        self._queue_drag_ghost_clear()
         if from_idx is None:
             return
         if to_idx is None:
             return
 
-        with self._pending_cv:
-            pending_len = len(self._pending_tasks)
-            if pending_len <= 1:
-                return
-            if from_idx < 0 or from_idx >= pending_len:
-                return
-            if to_idx < 0:
-                to_idx = 0
-            if to_idx >= pending_len:
-                to_idx = pending_len - 1
-            if to_idx == from_idx:
-                return
-            item = self._pending_tasks.pop(from_idx)
-            self._pending_tasks.insert(to_idx, item)
-
-        self._sync_queue_order_for_processing()
-
-        self._refresh_queue_list()
-        self._update_job_bar()
+        # Motion already performed live reorders; drop just finalizes.
+        self._debug_log(f"QUEUE DRAG drop: to={to_idx}")
 
     # -------------------- Result Tab --------------------
     def _build_result_tab(self) -> None:
