@@ -112,7 +112,9 @@ class ConvertableApp:
         self.jobs: list[ConversionJob] = []
         self.results: list[ConversionResultItem] = []
 
-        self._task_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        # Pending conversion tasks (reorderable for queue prioritization).
+        self._pending_tasks: list[tuple[str, str]] = []
+        self._pending_cv = threading.Condition()
         self._ui_events: queue.Queue[tuple] = queue.Queue()
         self._in_progress: set[str] = set()
         self._progress: dict[str, float] = {}
@@ -130,6 +132,8 @@ class ConvertableApp:
         self._queue_failed: set[str] = set()
         self._current_job_path: str | None = None
         self._current_job_target: str | None = None
+        self._queue_drag_from: int | None = None
+        self._queue_drag_to: int | None = None
 
         # Converted outputs are written to a temporary session folder first.
         # They only get copied to the user's disk output folder when they click Save.
@@ -192,20 +196,48 @@ class ConvertableApp:
 
         self.drop_frame = ttk.Frame(self.notebook)
         self.convert_frame = ttk.Frame(self.notebook)
+        self.queue_frame = ttk.Frame(self.notebook)
         self.result_frame = ttk.Frame(self.notebook)
 
         self.notebook.add(self.drop_frame, text="Drop")
         self.notebook.add(self.convert_frame, text="Convert")
+        self.notebook.add(self.queue_frame, text="Queue")
         self.notebook.add(self.result_frame, text="Result")
 
         self._build_drop_tab()
         self._build_convert_tab()
+        self._build_queue_tab()
         self._build_result_tab()
 
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind("<<Drop>>", self._on_drop)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _source_category(self, f: DroppedFile) -> str | None:
+        # None means unsupported / not convertible.
+        if f.mime == "inode/directory":
+            return None
+        ext = Path(f.path).suffix.lower()
+        if ext in {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".bmp", ".tiff", ".tif", ".gif"}:
+            return "image"
+        if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".aif"}:
+            return "audio"
+        if ext in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
+            return "video"
+
+        mime = (f.mime or "").lower()
+        if mime.startswith("image/"):
+            return "image"
+        if mime.startswith("audio/"):
+            return "audio"
+        if mime.startswith("video/"):
+            return "video"
+
+        return None
+
+    def _is_source_supported(self, f: DroppedFile) -> bool:
+        return self._source_category(f) is not None
 
     def _on_close(self) -> None:
         try:
@@ -585,8 +617,16 @@ class ConvertableApp:
                     _safe_raise(it, above)
 
         # Text colors
-        name_color = self._result_selected_text
-        muted = self._result_selected_text
+        is_supported = self._is_source_supported(dropped)
+        if is_selected:
+            name_color = self._convert_selected_text
+            muted = self._convert_selected_text
+        elif not is_supported:
+            name_color = self._convert_muted
+            muted = self._convert_muted
+        else:
+            name_color = self._convert_text
+            muted = self._convert_muted
 
         name = self._ellipsize(dropped.name, name_w - 10)
         size_txt = _human_size(dropped.size_bytes)
@@ -728,13 +768,27 @@ class ConvertableApp:
         elif len(self.selected_paths) == 1:
             f = self._find_dropped_by_path(self.selected_paths[0])
             self.selected_file_label.configure(text=(f.name if f else "Select file(s)"))
-            self._set_action_enabled(True)
-            if f:
+            if f and self._is_source_supported(f):
+                self._set_action_enabled(True)
                 self._set_convert_options_for_kind(f.mime)
+            else:
+                self._set_action_enabled(False)
         else:
             self.selected_file_label.configure(text=f"{len(self.selected_paths)} files selected")
-            self._set_action_enabled(True)
-            self._set_convert_options_for_selection(self.selected_paths)
+            cats: list[str | None] = []
+            for p in self.selected_paths:
+                f = self._find_dropped_by_path(p)
+                cats.append(self._source_category(f) if f else None)
+
+            if any(c is None for c in cats):
+                self._set_action_enabled(False)
+            else:
+                unique = {c for c in cats if c is not None}
+                if len(unique) != 1:
+                    self._set_action_enabled(False)
+                else:
+                    self._set_action_enabled(True)
+                    self._set_convert_options_for_selection(self.selected_paths)
 
         self._refresh_row_visuals()
 
@@ -854,19 +908,18 @@ class ConvertableApp:
                 w.configure(bg=_bg_for_widget(w))
 
     def _set_convert_options_for_selection(self, selected_paths: list[str]) -> None:
-        mimes: list[str] = []
+        cats: list[str | None] = []
         for path in selected_paths:
             f = self._find_dropped_by_path(path)
-            if f is not None:
-                mimes.append(f.mime)
+            cats.append(self._source_category(f) if f else None)
 
-        if mimes and all(m.startswith("image/") for m in mimes):
+        if cats and all(c == "image" for c in cats):
             self._set_convert_options_for_kind("image/")
             return
-        if mimes and all(m.startswith("audio/") for m in mimes):
+        if cats and all(c == "audio" for c in cats):
             self._set_convert_options_for_kind("audio/")
             return
-        if mimes and all(m.startswith("video/") for m in mimes):
+        if cats and all(c == "video" for c in cats):
             self._set_convert_options_for_kind("video/")
             return
         self._set_convert_options_for_kind("application/octet-stream")
@@ -902,6 +955,14 @@ class ConvertableApp:
     def _remove_paths(self, paths: set[str]) -> None:
         self.dropped = [f for f in self.dropped if f.path not in paths]
         self.jobs = [j for j in self.jobs if j.source_path not in paths]
+
+        # Remove any pending tasks for these paths.
+        try:
+            with self._pending_cv:
+                self._pending_tasks = [(p, t) for (p, t) in self._pending_tasks if p not in paths]
+        except Exception:
+            pass
+
         for p in paths:
             self._in_progress.discard(p)
             self._progress.pop(p, None)
@@ -909,7 +970,16 @@ class ConvertableApp:
             self._target_by_path.pop(p, None)
             self._last_progress_ts.pop(p, None)
             self._job_started_ts.pop(p, None)
+            self._queue_paths.discard(p)
+            self._queue_done.discard(p)
+            self._queue_failed.discard(p)
+            if p in self._queue_order:
+                try:
+                    self._queue_order = [x for x in self._queue_order if x != p]
+                except Exception:
+                    pass
         self._refresh_all_lists()
+        self._refresh_queue_list()
         self._update_job_bar()
 
     def _queue_conversion(self) -> None:
@@ -935,6 +1005,8 @@ class ConvertableApp:
             dropped_file = self._find_dropped_by_path(src_path)
             if dropped_file is None:
                 continue
+            if not self._is_source_supported(dropped_file):
+                continue
             self._in_progress.add(src_path)
             self._progress[src_path] = 0.0
             self._display_progress[src_path] = 0.0
@@ -942,20 +1014,524 @@ class ConvertableApp:
             now = time.time()
             self._last_progress_ts[src_path] = now
             self._job_started_ts[src_path] = now
-            self._task_queue.put((src_path, target_ext))
+            with self._pending_cv:
+                self._pending_tasks.append((src_path, target_ext))
+                self._pending_cv.notify()
 
             # Queue stats tracking
             self._queue_paths.add(src_path)
             if src_path not in self._queue_order:
                 self._queue_order.append(src_path)
 
+        self._sync_queue_order_for_processing()
+
         # Keep user on this page; show progress fill.
         self._start_progress_animation()
         self._refresh_convert_progress()
+        self._refresh_queue_list()
         self._update_job_bar()
 
     def _toggle_job_bar(self) -> None:
         self._job_bar_collapsed = not self._job_bar_collapsed
+        self._update_job_bar()
+
+    # -------------------- Queue Tab --------------------
+    def _build_queue_tab(self) -> None:
+        self.queue_frame.rowconfigure(1, weight=1)
+        self.queue_frame.columnconfigure(0, weight=1)
+
+        # Queue/job stat card (same stats as Convert tab)
+        self.queue_bar = ttk.Frame(self.queue_frame)
+        self.queue_bar.grid(row=0, column=0, sticky="ew")
+        self.queue_bar.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(self.queue_bar)
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        header.columnconfigure(0, weight=1)
+
+        self.queue_bar_label = ttk.Label(header, text="Queue")
+        self.queue_bar_label.grid(row=0, column=0, sticky="w")
+
+        self.queue_bar_toggle = ttk.Button(header, text="Hide", width=7, command=self._toggle_job_bar)
+        self.queue_bar_toggle.grid(row=0, column=1, sticky="e")
+
+        self.queue_bar_body = ttk.Frame(self.queue_bar)
+        self.queue_bar_body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self.queue_bar_body.columnconfigure(0, weight=1)
+
+        self.queue_bar_stats = ttk.Label(self.queue_bar_body, text="")
+        self.queue_bar_stats.grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        self.queue_bar_current = ttk.Label(self.queue_bar_body, text="")
+        self.queue_bar_current.grid(row=1, column=0, sticky="w", pady=(0, 8))
+
+        self.queue_bar_progress = ttk.Progressbar(self.queue_bar_body, orient="horizontal", mode="determinate", maximum=100)
+        self.queue_bar_progress.grid(row=2, column=0, sticky="ew")
+
+        # Reorderable queued-items list (Convert-like UI)
+        list_host = ttk.Frame(self.queue_frame)
+        list_host.grid(row=1, column=0, sticky="nsew")
+        list_host.rowconfigure(0, weight=1)
+        list_host.columnconfigure(0, weight=1)
+
+        self.queue_canvas = tkinter.Canvas(list_host, highlightthickness=0)
+        self.queue_canvas.grid(row=0, column=0, sticky="nsew")
+        self.queue_canvas.configure(bg=self._normal_bg)
+        self.queue_scroll = ttk.Scrollbar(list_host, orient="vertical", command=self.queue_canvas.yview)
+        self.queue_scroll.grid(row=0, column=1, sticky="ns")
+        self.queue_canvas.configure(yscrollcommand=self.queue_scroll.set)
+
+        self.queue_list_frame = tkinter.Frame(self.queue_canvas, bg=self._normal_bg)
+        self.queue_list_frame.columnconfigure(0, weight=1)
+        self._queue_list_window = self.queue_canvas.create_window((0, 0), window=self.queue_list_frame, anchor="nw")
+
+        self.queue_list_frame.bind("<Configure>", self._on_queue_list_configure)
+        self.queue_canvas.bind("<Configure>", self._on_queue_canvas_configure)
+
+        # Mouse wheel scrolling (trackpad included). Bind only while cursor is over the list.
+        self.queue_canvas.bind("<Enter>", self._bind_queue_mousewheel)
+        self.queue_canvas.bind("<Leave>", self._unbind_queue_mousewheel)
+
+        self._refresh_queue_list()
+        self._update_job_bar()
+
+    def _on_queue_list_configure(self, _event=None) -> None:
+        try:
+            self.queue_canvas.configure(scrollregion=self.queue_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _bind_queue_mousewheel(self, _event=None) -> None:
+        self.root.bind_all("<MouseWheel>", self._on_queue_mousewheel)
+        # Linux
+        self.root.bind_all("<Button-4>", self._on_queue_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_queue_mousewheel)
+
+    def _unbind_queue_mousewheel(self, _event=None) -> None:
+        self.root.unbind_all("<MouseWheel>")
+        self.root.unbind_all("<Button-4>")
+        self.root.unbind_all("<Button-5>")
+
+    def _on_queue_mousewheel(self, event) -> None:
+        if getattr(self, "queue_canvas", None) is None:
+            return
+        if getattr(event, "num", None) == 4:
+            self.queue_canvas.yview_scroll(-1, "units")
+            return
+        if getattr(event, "num", None) == 5:
+            self.queue_canvas.yview_scroll(1, "units")
+            return
+
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return
+        direction = -1 if delta > 0 else 1
+        steps = 1
+        if sys.platform.startswith("win"):
+            steps = max(1, int(abs(delta) / 120))
+        self.queue_canvas.yview_scroll(direction * steps, "units")
+
+    def _on_queue_canvas_configure(self, event) -> None:
+        try:
+            self.queue_canvas.itemconfigure(self._queue_list_window, width=event.width)
+        except Exception:
+            pass
+        self._layout_queue_rows(event.width)
+
+    def _layout_queue_rows(self, width: int) -> None:
+        rows = getattr(self, "_queue_rows", None)
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            c = row.get("canvas")
+            if not isinstance(c, tkinter.Canvas):
+                continue
+            try:
+                c.configure(width=width)
+            except Exception:
+                pass
+            self._render_queue_row(row, width)
+
+    def _render_queue_row(self, row: dict[str, object], width: int) -> None:
+        c = row.get("canvas")
+        if not isinstance(c, tkinter.Canvas):
+            return
+        path = row.get("path")
+        if not isinstance(path, str):
+            return
+
+        def _item_exists(item_id: int) -> bool:
+            try:
+                return bool(c.type(item_id))
+            except Exception:
+                return False
+
+        def _safe_delete(item_id: int) -> None:
+            try:
+                c.delete(item_id)
+            except Exception:
+                pass
+
+        def _safe_raise(item_id: int, above: int | None = None) -> None:
+            try:
+                if not _item_exists(item_id):
+                    return
+                if above is not None and _item_exists(above):
+                    c.tag_raise(item_id, above)
+                else:
+                    c.tag_raise(item_id)
+            except Exception:
+                pass
+
+        def _safe_lower(item_id: int) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.tag_lower(item_id)
+            except Exception:
+                pass
+
+        def _safe_coords(item_id: int, *coords: int) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.coords(item_id, *coords)
+            except Exception:
+                pass
+
+        def _safe_itemconfigure(item_id: int, **kwargs) -> None:
+            try:
+                if _item_exists(item_id):
+                    c.itemconfigure(item_id, **kwargs)
+            except Exception:
+                pass
+
+        def _delete_item_or_items(v: object) -> None:
+            if isinstance(v, int):
+                _safe_delete(v)
+                return
+            if isinstance(v, (list, tuple)):
+                for it in v:
+                    if isinstance(it, int):
+                        _safe_delete(it)
+
+        def _draw_linked_fill(
+            x1: int,
+            y1: int,
+            x2: int,
+            y2: int,
+            r: int,
+            fill: str,
+        ) -> list[int]:
+            ids: list[int] = []
+            if x2 <= x1 or y2 <= y1:
+                return ids
+            if r <= 0:
+                rect = c.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+                return [rect]
+            rr = self._rounded_rect(c, x1, y1, x2, y2, r, fill=fill, outline="")
+            ids.append(rr)
+            # Ensure full coverage (rounded rect draws arcs)
+            mask = c.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+            ids.append(mask)
+            return ids
+
+        row_h = int(c.cget("height"))
+        pad_l = 10
+        pad_y = 4
+        radius = 8
+        bar_pad_r = 10
+        content_pad_r = 20
+
+        is_current = self._current_job_path is not None and str(self._current_job_path) == path
+
+        # Progress background bar
+        real_p = float(self._progress.get(path, 0.0))
+        disp_p = float(self._display_progress.get(path, real_p))
+        p = max(0.0, min(1.0, disp_p))
+
+        prog_v = row.get("prog")
+        if prog_v is not None:
+            _delete_item_or_items(prog_v)
+            row.pop("prog", None)
+
+        if p > 0.0:
+            inner_left = pad_l
+            inner_right = max(inner_left + 1, width - bar_pad_r)
+            inner_top = pad_y
+            inner_bottom = max(inner_top + 1, row_h - pad_y)
+            track_w = max(0, inner_right - inner_left)
+            fill_w = int(track_w * p)
+            if fill_w > 0 and track_w > 0:
+                base = self._result_selected_bg if is_current else self._normal_bg
+                fill_color = self._blend_hex(self._progress_bg, base, 0.85 if is_current else 1.0)
+                r = min(radius, int(fill_w / 2), int((inner_bottom - inner_top) / 2))
+                prog_ids = _draw_linked_fill(
+                    inner_left,
+                    inner_top,
+                    inner_left + fill_w,
+                    inner_bottom,
+                    r,
+                    fill_color,
+                )
+                row["prog"] = prog_ids
+                for it in prog_ids:
+                    _safe_lower(it)
+
+        # Current-job highlight (blue pill like selection)
+        sel_v = row.get("sel")
+        if sel_v is not None:
+            _delete_item_or_items(sel_v)
+            row.pop("sel", None)
+        if is_current:
+            x1 = pad_l
+            x2 = max(pad_l + 1, width - bar_pad_r)
+            y1 = pad_y
+            y2 = max(pad_y + 1, row_h - pad_y)
+            sel_ids = _draw_linked_fill(x1, y1, x2, y2, radius, self._result_selected_bg)
+            row["sel"] = sel_ids
+            for it in sel_ids:
+                _safe_lower(it)
+
+        # Text layout
+        name_x = pad_l + 10
+        right_x = max(name_x + 60, width - content_pad_r)
+        max_name_w = max(60, right_x - name_x - 12)
+
+        name = self._ellipsize(Path(path).name, max_name_w)
+        t_name = row.get("t_name")
+        t_status = row.get("t_status")
+        sep = row.get("sep")
+
+        if is_current:
+            name_color = self._result_selected_text
+            status_color = self._result_selected_text
+        else:
+            name_color = self._result_text
+            status_color = self._result_muted
+
+        if isinstance(t_name, int):
+            _safe_coords(t_name, name_x, int(row_h / 2))
+            _safe_itemconfigure(t_name, text=name, fill=name_color)
+        if isinstance(t_status, int):
+            _safe_coords(t_status, right_x, int(row_h / 2))
+            _safe_itemconfigure(t_status, fill=status_color)
+
+        # Keep text above fills
+        if isinstance(t_name, int):
+            _safe_raise(t_name)
+        if isinstance(t_status, int):
+            _safe_raise(t_status)
+
+        # Separator line
+        if isinstance(sep, int):
+            _safe_itemconfigure(sep, state="normal")
+            _safe_coords(sep, pad_l, row_h - 1, width - bar_pad_r, row_h - 1)
+
+    def _sync_queue_order_for_processing(self) -> None:
+        """Keep _queue_order aligned to actual processing order: current first, then pending."""
+        try:
+            with self._pending_cv:
+                pending_paths = [p for (p, _t) in self._pending_tasks]
+        except Exception:
+            pending_paths = []
+
+        cur = self._current_job_path
+        order: list[str] = []
+        if cur:
+            order.append(str(cur))
+        for p in pending_paths:
+            if p not in order:
+                order.append(p)
+
+        # Preserve anything else we were tracking for this batch.
+        for p in self._queue_order:
+            if p not in order and p in self._queue_paths:
+                order.append(p)
+
+        self._queue_order = order
+
+    def _queue_display_items(self) -> list[tuple[str, str, str]]:
+        """Return (src_path, target_ext, status) in processing order (current first)."""
+        items: list[tuple[str, str, str]] = []
+
+        cur = self._current_job_path
+        if cur:
+            tgt = self._target_by_path.get(str(cur), self._current_job_target or "")
+            items.append((str(cur), str(tgt or ""), "Converting"))
+
+        try:
+            with self._pending_cv:
+                pending = list(self._pending_tasks)
+        except Exception:
+            pending = []
+
+        for src, tgt in pending:
+            if cur and str(src) == str(cur):
+                continue
+            items.append((str(src), str(tgt), "Queued"))
+
+        return items
+
+    def _refresh_queue_list(self) -> None:
+        frame = getattr(self, "queue_list_frame", None)
+        if not isinstance(frame, tkinter.Frame):
+            return
+
+        self._sync_queue_order_for_processing()
+
+        for child in list(frame.winfo_children()):
+            child.destroy()
+
+        display = self._queue_display_items()
+        self._queue_rows: list[dict[str, object]] = []
+
+        row_h = 34
+        for row_idx, (src, tgt, status) in enumerate(display):
+            c = tkinter.Canvas(
+                frame,
+                height=row_h,
+                highlightthickness=0,
+                bd=0,
+                bg=self._normal_bg,
+            )
+            c.grid(row=row_idx, column=0, sticky="ew")
+
+            # Text + separator (positions set in _render_queue_row)
+            t_name = c.create_text(0, int(row_h / 2), text=Path(src).name, anchor="w", fill=self._result_text, font=self.font_normal)
+            right_txt = f"→ {tgt}" if tgt else ""
+            if status:
+                right_txt = (right_txt + ("  " if right_txt else "") + status).strip()
+            t_status = c.create_text(0, int(row_h / 2), text=right_txt, anchor="e", fill=self._result_muted, font=self.font_normal)
+            sep = c.create_line(10, row_h - 1, 10, row_h - 1, fill="#2c2c2e")
+
+            def _start_drag(ev, p=str(src)) -> str:
+                self._on_queue_drag_start(ev, p)
+                return "break"
+
+            c.bind("<ButtonPress-1>", _start_drag)
+
+            self._queue_rows.append(
+                {
+                    "idx": row_idx,
+                    "path": str(src),
+                    "target": str(tgt),
+                    "status": str(status),
+                    "canvas": c,
+                    "prog": None,
+                    "sel": None,
+                    "t_name": t_name,
+                    "t_status": t_status,
+                    "sep": sep,
+                }
+            )
+
+        try:
+            self.queue_canvas.update_idletasks()
+            self._layout_queue_rows(self.queue_canvas.winfo_width())
+            self.queue_canvas.configure(scrollregion=self.queue_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_queue_drag_start(self, _event=None, path: str | None = None) -> None:
+        if not path:
+            self._queue_drag_from = None
+            return
+        # The current converting item is always fixed at the top.
+        if self._current_job_path and str(path) == str(self._current_job_path):
+            self._queue_drag_from = None
+            return
+        try:
+            with self._pending_cv:
+                pending_paths = [p for (p, _t) in self._pending_tasks]
+        except Exception:
+            pending_paths = []
+
+        if str(path) not in pending_paths:
+            self._queue_drag_from = None
+            return
+
+        self._queue_drag_from = pending_paths.index(str(path))
+        self._queue_drag_to = self._queue_drag_from
+
+        # Capture mouse globally during drag so we can track across rows.
+        try:
+            self.root.bind("<B1-Motion>", self._on_queue_drag_motion)
+            self.root.bind("<ButtonRelease-1>", self._on_queue_drag_drop)
+        except Exception:
+            pass
+
+    def _on_queue_drag_motion(self, event) -> None:
+        if self._queue_drag_from is None:
+            return
+        canvas = getattr(self, "queue_canvas", None)
+        if not isinstance(canvas, tkinter.Canvas):
+            return
+
+        try:
+            y_root = getattr(event, "y_root", None)
+            if y_root is None:
+                y_root = self.root.winfo_pointery()
+            y = int(y_root) - int(canvas.winfo_rooty())
+            y_canvas = float(canvas.canvasy(y))
+        except Exception:
+            return
+
+        row_h = 34
+        display_idx = max(0, int(y_canvas // row_h))
+
+        offset = 1 if self._current_job_path else 0
+        try:
+            with self._pending_cv:
+                pending_len = len(self._pending_tasks)
+        except Exception:
+            pending_len = 0
+        if pending_len <= 0:
+            return
+
+        if display_idx < offset:
+            to_idx = 0
+        else:
+            to_idx = display_idx - offset
+        if to_idx < 0:
+            to_idx = 0
+        if to_idx >= pending_len:
+            to_idx = pending_len - 1
+        self._queue_drag_to = to_idx
+
+    def _on_queue_drag_drop(self, event) -> None:
+        # Release global capture.
+        try:
+            self.root.unbind("<B1-Motion>")
+            self.root.unbind("<ButtonRelease-1>")
+        except Exception:
+            pass
+
+        from_idx = self._queue_drag_from
+        to_idx = self._queue_drag_to
+        self._queue_drag_from = None
+        self._queue_drag_to = None
+        if from_idx is None:
+            return
+        if to_idx is None:
+            return
+
+        with self._pending_cv:
+            pending_len = len(self._pending_tasks)
+            if pending_len <= 1:
+                return
+            if from_idx < 0 or from_idx >= pending_len:
+                return
+            if to_idx < 0:
+                to_idx = 0
+            if to_idx >= pending_len:
+                to_idx = pending_len - 1
+            if to_idx == from_idx:
+                return
+            item = self._pending_tasks.pop(from_idx)
+            self._pending_tasks.insert(to_idx, item)
+
+        self._sync_queue_order_for_processing()
+
+        self._refresh_queue_list()
         self._update_job_bar()
 
     # -------------------- Result Tab --------------------
@@ -1483,6 +2059,10 @@ class ConvertableApp:
         self.convert_canvas.yview_moveto(y / height)
 
     def _on_row_click(self, event, path: str) -> None:
+        f = self._find_dropped_by_path(path)
+        if f is not None and not self._is_source_supported(f):
+            return
+
         # Multi-select support:
         # - Click: select single
         # - Shift-click: select range from anchor
@@ -1664,14 +2244,13 @@ class ConvertableApp:
             if last_ts:
                 age_s = max(0, int(now - last_ts))
 
-        # Header
         if total == 0:
-            self.job_bar_label.configure(text="Queue")
-            self.job_bar_stats.configure(text="No jobs queued")
-            self.job_bar_current.configure(text="")
-            self.job_bar_progress.configure(value=0)
+            label_text = "Queue"
+            stats_text = "No jobs queued"
+            current_text = ""
+            progress_value = 0.0
         else:
-            self.job_bar_label.configure(text=f"Queue · {done}/{total} complete · {_pct(overall)}{target_txt}")
+            label_text = f"Queue · {done}/{total} complete · {_pct(overall)}{target_txt}"
             stats = f"Completed: {done}/{total}"
             if failed:
                 stats += f" · Failed: {failed}"
@@ -1679,7 +2258,7 @@ class ConvertableApp:
                 stats += f" · In progress: {running}"
             if total_bytes > 0:
                 stats += f" · Data: {_human_size(done_bytes)}/{_human_size(total_bytes)}"
-            self.job_bar_stats.configure(text=stats)
+            stats_text = stats
 
             if cur:
                 cur_txt = f"Current: {cur_name}"
@@ -1688,25 +2267,49 @@ class ConvertableApp:
                 cur_txt += f" · {_pct(cur_p)}"
                 if cur_p >= 0.90 and age_s >= 10:
                     cur_txt += f" · Finalizing (no new progress {age_s}s)"
-                self.job_bar_current.configure(text=cur_txt)
+                current_text = cur_txt
             else:
-                self.job_bar_current.configure(text="")
+                current_text = ""
 
-            self.job_bar_progress.configure(value=max(0.0, min(100.0, overall * 100.0)))
+            progress_value = max(0.0, min(100.0, overall * 100.0))
 
-        # Collapse/expand
-        if self._job_bar_collapsed:
+        cards: list[tuple[ttk.Label, ttk.Label, ttk.Label, ttk.Progressbar, ttk.Frame, ttk.Button]] = []
+        try:
+            cards.append((self.job_bar_label, self.job_bar_stats, self.job_bar_current, self.job_bar_progress, self.job_bar_body, self.job_bar_toggle))
+        except Exception:
+            pass
+        try:
+            cards.append((self.queue_bar_label, self.queue_bar_stats, self.queue_bar_current, self.queue_bar_progress, self.queue_bar_body, self.queue_bar_toggle))
+        except Exception:
+            pass
+
+        for lbl, stats_lbl, cur_lbl, prog, body, toggle_btn in cards:
             try:
-                self.job_bar_body.grid_remove()
+                lbl.configure(text=label_text)
+                stats_lbl.configure(text=stats_text)
+                cur_lbl.configure(text=current_text)
+                prog.configure(value=progress_value)
             except Exception:
                 pass
-            self.job_bar_toggle.configure(text="Show")
-        else:
-            try:
-                self.job_bar_body.grid()
-            except Exception:
-                pass
-            self.job_bar_toggle.configure(text="Hide")
+
+            if self._job_bar_collapsed:
+                try:
+                    body.grid_remove()
+                except Exception:
+                    pass
+                try:
+                    toggle_btn.configure(text="Show")
+                except Exception:
+                    pass
+            else:
+                try:
+                    body.grid()
+                except Exception:
+                    pass
+                try:
+                    toggle_btn.configure(text="Hide")
+                except Exception:
+                    pass
 
     def _start_progress_animation(self) -> None:
         if self._animate_active:
@@ -1743,7 +2346,10 @@ class ConvertableApp:
 
     def _conversion_worker(self) -> None:
         while True:
-            src_path, target_ext = self._task_queue.get()
+            with self._pending_cv:
+                while not self._pending_tasks:
+                    self._pending_cv.wait()
+                src_path, target_ext = self._pending_tasks.pop(0)
             try:
                 self._ui_events.put(("start", src_path, target_ext))
                 # Predict output paths so the user can find ffmpeg logs even if the job hangs.
@@ -1783,8 +2389,6 @@ class ConvertableApp:
             except Exception as e:
                 self._ui_events.put(("error", src_path, str(e)))
                 self._debug_log(f"WORKER error: src={src_path} err={e}")
-            finally:
-                self._task_queue.task_done()
 
     def _process_ui_events(self) -> None:
         try:
@@ -1800,6 +2404,7 @@ class ConvertableApp:
                     _k, path, target_ext = evt
                     self._current_job_path = str(path)
                     self._current_job_target = str(target_ext)
+                    self._sync_queue_order_for_processing()
                     changed = True
                 elif kind == "progress":
                     _k, path, v = evt
@@ -1861,6 +2466,8 @@ class ConvertableApp:
 
             if changed:
                 self._refresh_convert_progress()
+                self._refresh_queue_list()
+                self._update_job_bar()
         except Exception as e:
             self._on_tk_exception(type(e), e, e.__traceback__)
         finally:
