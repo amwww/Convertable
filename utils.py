@@ -3,9 +3,11 @@ import mimetypes
 import subprocess
 import time
 import select
+import sys
+import tempfile
 from pathlib import Path
 import filetype as ft
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip
 from typing import Callable
@@ -38,11 +40,41 @@ class FileConverter:
             progress(0.1)
         outputFile = self.buildOutputPath(inputFile, outputFiletype)
 
-        with Image.open(inputFile) as img:
-            fmt = outputFiletype.upper()
+        def _save_from_pil(img: Image.Image) -> None:
+            fmt = outputFiletype.upper().lstrip(".")
             if fmt in {"JPEG", "JPG"} and img.mode in {"RGBA", "P"}:
                 img = img.convert("RGB")
             img.save(outputFile, format=fmt)
+
+        try:
+            with Image.open(inputFile) as img:
+                _save_from_pil(img)
+        except (UnidentifiedImageError, OSError):
+            # Pillow doesn't support HEIC/HEIF by default.
+            # On macOS, use the built-in `sips` tool to transcode to PNG first.
+            lower = inputFile.lower()
+            if sys.platform == "darwin" and (lower.endswith(".heic") or lower.endswith(".heif")):
+                if progress:
+                    progress(0.2)
+                with tempfile.TemporaryDirectory(prefix="convertable-heic-") as td:
+                    tmp_png = os.path.join(td, "_convertable_input.png")
+                    proc = subprocess.run(
+                        ["sips", "-s", "format", "png", inputFile, "--out", tmp_png],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                    if proc.returncode != 0 or not os.path.exists(tmp_png):
+                        raise RuntimeError(
+                            f"Failed to convert HEIC via sips (exit={proc.returncode}): {proc.stderr.strip()}"
+                        )
+                    if progress:
+                        progress(0.45)
+                    with Image.open(tmp_png) as img:
+                        _save_from_pil(img)
+            else:
+                raise
 
         if progress:
             progress(1.0)

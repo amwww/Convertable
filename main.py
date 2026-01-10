@@ -122,6 +122,15 @@ class ConvertableApp:
         self._last_progress_ts: dict[str, float] = {}
         self._job_started_ts: dict[str, float] = {}
 
+        # Queue/Job card state
+        self._job_bar_collapsed: bool = False
+        self._queue_paths: set[str] = set()
+        self._queue_order: list[str] = []
+        self._queue_done: set[str] = set()
+        self._queue_failed: set[str] = set()
+        self._current_job_path: str | None = None
+        self._current_job_target: str | None = None
+
         # Converted outputs are written to a temporary session folder first.
         # They only get copied to the user's disk output folder when they click Save.
         self._session_output_dir = tempfile.mkdtemp(prefix="convertable-")
@@ -227,15 +236,33 @@ class ConvertableApp:
         self.convert_frame.rowconfigure(1, weight=1)
         self.convert_frame.columnconfigure(0, weight=1)
 
-        # Job bar (hidden unless conversions running)
+        # Queue/job stat card (always visible + collapsible)
         self.job_bar = ttk.Frame(self.convert_frame)
         self.job_bar.grid(row=0, column=0, sticky="ew")
         self.job_bar.columnconfigure(0, weight=1)
-        self.job_bar_label = ttk.Label(self.job_bar, text="")
-        self.job_bar_label.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
-        self.job_bar_progress = ttk.Progressbar(self.job_bar, orient="horizontal", mode="determinate", maximum=100)
-        self.job_bar_progress.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-        self.job_bar.grid_remove()
+
+        header = ttk.Frame(self.job_bar)
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        header.columnconfigure(0, weight=1)
+
+        self.job_bar_label = ttk.Label(header, text="Queue")
+        self.job_bar_label.grid(row=0, column=0, sticky="w")
+
+        self.job_bar_toggle = ttk.Button(header, text="Hide", width=7, command=self._toggle_job_bar)
+        self.job_bar_toggle.grid(row=0, column=1, sticky="e")
+
+        self.job_bar_body = ttk.Frame(self.job_bar)
+        self.job_bar_body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self.job_bar_body.columnconfigure(0, weight=1)
+
+        self.job_bar_stats = ttk.Label(self.job_bar_body, text="")
+        self.job_bar_stats.grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        self.job_bar_current = ttk.Label(self.job_bar_body, text="")
+        self.job_bar_current.grid(row=1, column=0, sticky="w", pady=(0, 8))
+
+        self.job_bar_progress = ttk.Progressbar(self.job_bar_body, orient="horizontal", mode="determinate", maximum=100)
+        self.job_bar_progress.grid(row=2, column=0, sticky="ew")
 
         # Scrollable file list
         list_host = ttk.Frame(self.convert_frame)
@@ -292,6 +319,7 @@ class ConvertableApp:
         self.convert_btn.pack(side="right", padx=12, pady=8)
 
         self._set_action_enabled(False)
+        self._update_job_bar()
 
     def _set_action_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -404,13 +432,67 @@ class ConvertableApp:
             except Exception:
                 pass
 
-        is_selected = path in set(self.selected_paths)
+        def _delete_item_or_items(v: object) -> None:
+            if isinstance(v, int):
+                _safe_delete(v)
+                return
+            if isinstance(v, (list, tuple)):
+                for it in v:
+                    if isinstance(it, int):
+                        _safe_delete(it)
+
+        def _draw_linked_fill(
+            x1: int,
+            y1: int,
+            x2: int,
+            y2: int,
+            r: int,
+            fill: str,
+            round_top: bool,
+            round_bottom: bool,
+        ) -> list[int]:
+            ids: list[int] = []
+            if x2 <= x1 or y2 <= y1:
+                return ids
+            if r <= 0 or (not round_top and not round_bottom):
+                rect = c.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+                return [rect]
+
+            rr = self._rounded_rect(c, x1, y1, x2, y2, r, fill=fill, outline="")
+            ids.append(rr)
+            if round_top and not round_bottom:
+                # Square the bottom corners by overdrawing from below the top radius.
+                mask = c.create_rectangle(x1, y1 + r, x2, y2, fill=fill, outline="")
+                ids.append(mask)
+            elif (not round_top) and round_bottom:
+                # Square the top corners by overdrawing up to above the bottom radius.
+                mask = c.create_rectangle(x1, y1, x2, y2 - r, fill=fill, outline="")
+                ids.append(mask)
+            return ids
+
+        selected_set = set(self.selected_paths)
+        is_selected = path in selected_set
 
         row_h = int(c.cget("height"))
-        pad_x = 10
+        pad_l = 10
+        # Keep the highlight/progress bar nearly full-width, but inset the
+        # right-aligned content so it doesn't sit on the bar edge.
+        bar_pad_r = 10
+        content_pad_r = 30
         pad_y = 4
         radius = 8
         gap = 12
+
+        idx = row.get("idx")
+        if not isinstance(idx, int):
+            idx = -1
+        prev_selected = False
+        next_selected = False
+        if 0 <= idx < len(self.dropped):
+            if idx - 1 >= 0:
+                prev_selected = self.dropped[idx - 1].path in selected_set
+            if idx + 1 < len(self.dropped):
+                next_selected = self.dropped[idx + 1].path in selected_set
 
         # Columns (right-aligned): remove | size | mime | ext
         ext_w = int(self._min_ext_px)
@@ -418,12 +500,12 @@ class ConvertableApp:
         size_w = int(self._min_size_px)
         remove_w = int(self._min_remove_px)
 
-        ext_left = max(pad_x, width - pad_x - ext_w)
-        mime_left = max(pad_x, ext_left - gap - mime_w)
-        size_left = max(pad_x, mime_left - gap - size_w)
-        remove_left = max(pad_x, size_left - gap - remove_w)
+        ext_left = max(pad_l, width - content_pad_r - ext_w)
+        mime_left = max(pad_l, ext_left - gap - mime_w)
+        size_left = max(pad_l, mime_left - gap - size_w)
+        remove_left = max(pad_l, size_left - gap - remove_w)
 
-        name_x = pad_x + 10
+        name_x = pad_l + 10
         name_right = max(name_x + 60, remove_left - gap)
         name_w = max(60, name_right - name_x)
 
@@ -433,68 +515,75 @@ class ConvertableApp:
         p = max(0.0, min(1.0, disp_p))
 
         # Selection shape (blue highlight)
-        sel_id = row.get("sel")
-        if isinstance(sel_id, int):
-            _safe_delete(sel_id)
+        sel_v = row.get("sel")
+        if sel_v is not None:
+            _delete_item_or_items(sel_v)
             row.pop("sel", None)
         if is_selected:
-            sel_id = self._rounded_rect(
-                c,
-                pad_x,
-                pad_y,
-                max(pad_x + 1, width - pad_x),
-                max(pad_y + 1, row_h - pad_y),
+            x1 = pad_l
+            x2 = max(pad_l + 1, width - bar_pad_r)
+            y1 = 0 if prev_selected else pad_y
+            y2 = row_h if next_selected else max(pad_y + 1, row_h - pad_y)
+            sel_ids = _draw_linked_fill(
+                x1,
+                y1,
+                x2,
+                y2,
                 radius,
-                fill=self._result_selected_bg,
-                outline="",
+                self._result_selected_bg,
+                round_top=(not prev_selected),
+                round_bottom=(not next_selected),
             )
-            row["sel"] = sel_id
-            # Keep it behind the progress/text layers.
-            if isinstance(sel_id, int):
-                _safe_lower(sel_id)
+            row["sel"] = sel_ids
+            for it in sel_ids:
+                _safe_lower(it)
 
         # Progress bar (green), same geometry as the rounded selection.
-        prog_id = row.get("prog")
-        if isinstance(prog_id, int):
-            _safe_delete(prog_id)
+        prog_v = row.get("prog")
+        if prog_v is not None:
+            _delete_item_or_items(prog_v)
             row.pop("prog", None)
 
         if p > 0.0:
-            inner_left = pad_x
-            inner_top = pad_y
-            inner_right = max(inner_left + 1, width - pad_x)
-            inner_bottom = max(inner_top + 1, row_h - pad_y)
+            inner_left = pad_l
+            inner_right = max(inner_left + 1, width - bar_pad_r)
+            inner_top = 0 if (is_selected and prev_selected) else pad_y
+            inner_bottom = row_h if (is_selected and next_selected) else max(inner_top + 1, row_h - pad_y)
 
             track_w = max(0, inner_right - inner_left)
             fill_w = int(track_w * p)
             if fill_w > 0 and track_w > 0:
                 # Tk canvas has no alpha; simulate ~50% opacity by blending.
-                base = self._result_selected_bg if is_selected else self._normal_bg
-                opacity = 0.8 if is_selected else 1
+                opacity = 1
+                if is_selected:
+                    opacity = 0.8
+                base = self._selected_bg if is_selected else self._normal_bg
                 fill_color = self._blend_hex(self._progress_bg, base, opacity)
                 r = min(radius, int(fill_w / 2), int((inner_bottom - inner_top) / 2))
-                prog_id = self._rounded_rect(
-                    c,
+                prog_ids = _draw_linked_fill(
                     inner_left,
                     inner_top,
                     inner_left + fill_w,
                     inner_bottom,
                     r,
-                    fill=fill_color,
-                    outline="",
+                    fill_color,
+                    round_top=(not (is_selected and prev_selected)),
+                    round_bottom=(not (is_selected and next_selected)),
                 )
-                row["prog"] = prog_id
-                if isinstance(sel_id, int):
-                    if isinstance(prog_id, int):
-                        _safe_raise(prog_id, sel_id)
+                row["prog"] = prog_ids
+
+                above = None
+                sel_now = row.get("sel")
+                if isinstance(sel_now, list) and sel_now:
+                    above = sel_now[-1]
+                elif isinstance(sel_now, int):
+                    above = sel_now
+                for it in prog_ids:
+                    _safe_raise(it, above)
 
         # Text colors
-        if is_selected:
-            name_color = self._result_selected_text
-            muted = self._result_selected_text
-        else:
-            name_color = self._result_text
-            muted = self._result_muted
+        name_color = self._result_selected_text
+        muted = self._result_selected_text
 
         name = self._ellipsize(dropped.name, name_w - 10)
         size_txt = _human_size(dropped.size_bytes)
@@ -532,7 +621,11 @@ class ConvertableApp:
         # Separator line
         sep = row.get("sep")
         if isinstance(sep, int):
-            _safe_coords(sep, pad_x, row_h - 1, width - pad_x, row_h - 1)
+            if is_selected and next_selected:
+                _safe_itemconfigure(sep, state="hidden")
+            else:
+                _safe_itemconfigure(sep, state="normal")
+                _safe_coords(sep, pad_l, row_h - 1, width - bar_pad_r, row_h - 1)
 
     @staticmethod
     def _blend_hex(fg: str, bg: str, alpha: float) -> str:
@@ -819,6 +912,15 @@ class ConvertableApp:
         if not target_ext.startswith("."):
             target_ext = "." + target_ext
 
+        # If nothing is currently active, start a fresh batch.
+        if not self._in_progress:
+            self._queue_paths.clear()
+            self._queue_order.clear()
+            self._queue_done.clear()
+            self._queue_failed.clear()
+            self._current_job_path = None
+            self._current_job_target = None
+
         for src_path in sel:
             if src_path in self._in_progress:
                 continue
@@ -834,9 +936,18 @@ class ConvertableApp:
             self._job_started_ts[src_path] = now
             self._task_queue.put((src_path, target_ext))
 
+            # Queue stats tracking
+            self._queue_paths.add(src_path)
+            if src_path not in self._queue_order:
+                self._queue_order.append(src_path)
+
         # Keep user on this page; show progress fill.
         self._start_progress_animation()
         self._refresh_convert_progress()
+        self._update_job_bar()
+
+    def _toggle_job_bar(self) -> None:
+        self._job_bar_collapsed = not self._job_bar_collapsed
         self._update_job_bar()
 
     # -------------------- Result Tab --------------------
@@ -974,7 +1085,10 @@ class ConvertableApp:
         # Selection shape
         sel_id = row.get("sel")
         if isinstance(sel_id, int):
-            c.delete(sel_id)
+            try:
+                c.delete(sel_id)
+            except Exception:
+                pass
         if is_selected:
             sel_id = self._rounded_rect(
                 c,
@@ -987,6 +1101,11 @@ class ConvertableApp:
                 outline="",
             )
             row["sel"] = sel_id
+            # Selection should sit behind text, like Finder.
+            try:
+                c.tag_lower(sel_id)
+            except Exception:
+                pass
 
         if is_selected:
             text_color = self._result_selected_text
@@ -1006,12 +1125,24 @@ class ConvertableApp:
         if isinstance(t_name, int):
             c.coords(t_name, name_x, int(row_h / 2))
             c.itemconfigure(t_name, text=name, fill=text_color)
+            try:
+                c.tag_raise(t_name)
+            except Exception:
+                pass
         if isinstance(t_target, int):
             c.coords(t_target, target_x, int(row_h / 2))
             c.itemconfigure(t_target, text=target, fill=muted)
+            try:
+                c.tag_raise(t_target)
+            except Exception:
+                pass
         if isinstance(t_output, int):
             c.coords(t_output, output_x, int(row_h / 2))
             c.itemconfigure(t_output, text=output, fill=muted)
+            try:
+                c.tag_raise(t_output)
+            except Exception:
+                pass
 
         # Separator line
         sep = row.get("sep")
@@ -1021,6 +1152,49 @@ class ConvertableApp:
     def _on_result_row_click(self, idx: int) -> None:
         self.selected_result_index = idx
         self._refresh_result_row_visuals()
+
+    def _on_result_row_double_click(self, idx: int) -> None:
+        # Keep selection behavior consistent, then preview.
+        self._on_result_row_click(idx)
+        if idx < 0 or idx >= len(self.results):
+            return
+        res = self.results[idx]
+        preview_path = res.output_path or res.source_path
+        if not preview_path:
+            return
+        self._preview_file(preview_path)
+
+    def _preview_file(self, path: str) -> None:
+        try:
+            if not os.path.exists(path):
+                raise FileNotFoundError(path)
+
+            if sys.platform == "darwin":
+                # Finder-like preview (Quick Look).
+                try:
+                    subprocess.Popen(
+                        ["qlmanage", "-p", path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+                return
+
+            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self._debug_log(f"Preview failed: path={path} err={e}")
+            try:
+                messagebox.showerror(
+                    "Preview failed",
+                    f"{Path(path).name}\n\n{e}\n\nDebug log: {self._debug_log_path}",
+                )
+            except Exception:
+                pass
 
     def _refresh_result_row_visuals(self) -> None:
         width = self.result_canvas.winfo_width() if hasattr(self, "result_canvas") else 0
@@ -1160,6 +1334,7 @@ class ConvertableApp:
 
             self._convert_rows[f.path] = {
                 "path": f.path,
+                "idx": row_idx,
                 "canvas": c,
                 "prog": prog_id,
                 "t_name": t_name,
@@ -1320,7 +1495,11 @@ class ConvertableApp:
             def _click(_e, i=idx) -> None:
                 self._on_result_row_click(i)
 
+            def _dbl(_e, i=idx) -> None:
+                self._on_result_row_double_click(i)
+
             row_canvas.bind("<Button-1>", _click)
+            row_canvas.bind("<Double-Button-1>", _dbl)
 
             # Drag-out support per row
             try:
@@ -1337,41 +1516,104 @@ class ConvertableApp:
         self._update_job_bar()
 
     def _update_job_bar(self) -> None:
-        active = list(self._in_progress)
-        if not active:
+        total = len(self._queue_paths)
+        done = len(self._queue_done)
+        failed = len(self._queue_failed)
+        running = len(self._in_progress)
+
+        overall = 0.0
+        if total:
+            overall = sum(float(self._display_progress.get(p, self._progress.get(p, 0.0))) for p in self._queue_paths) / float(total)
+
+        # Approx "data converted" as input bytes processed.
+        total_bytes = 0
+        done_bytes = 0
+        for p in self._queue_paths:
+            dropped = self._find_dropped_by_path(p)
             try:
-                self.job_bar.grid_remove()
+                if dropped is not None and dropped.size_bytes is not None:
+                    size_b = int(dropped.size_bytes)
+                else:
+                    size_b = int(os.path.getsize(p))
+            except Exception:
+                size_b = 0
+            total_bytes += max(0, size_b)
+            frac = float(self._display_progress.get(p, self._progress.get(p, 0.0)))
+            frac = max(0.0, min(1.0, frac))
+            done_bytes += int(size_b * frac)
+
+        def _pct(x: float) -> str:
+            return f"{int(max(0.0, min(1.0, x)) * 100)}%"
+
+        # Derive target label when consistent.
+        targets = {self._target_by_path.get(p) for p in self._queue_paths}
+        targets.discard(None)
+        target_txt = f" to {next(iter(targets))}" if len(targets) == 1 else ""
+
+        # Current job
+        cur = self._current_job_path
+        if not cur and self._in_progress:
+            cur = next(iter(self._in_progress))
+        cur_idx = None
+        if cur and cur in self._queue_order:
+            try:
+                cur_idx = self._queue_order.index(cur) + 1
+            except Exception:
+                cur_idx = None
+        cur_name = Path(cur).name if cur else ""
+        cur_p = float(self._display_progress.get(cur, self._progress.get(cur, 0.0))) if cur else 0.0
+        cur_p = max(0.0, min(1.0, cur_p))
+
+        now = time.time()
+        age_s = 0
+        if cur:
+            last_ts = float(self._last_progress_ts.get(cur, 0.0))
+            if last_ts:
+                age_s = max(0, int(now - last_ts))
+
+        # Header
+        if total == 0:
+            self.job_bar_label.configure(text="Queue")
+            self.job_bar_stats.configure(text="No jobs queued")
+            self.job_bar_current.configure(text="")
+            self.job_bar_progress.configure(value=0)
+        else:
+            self.job_bar_label.configure(text=f"Queue · {done}/{total} complete · {_pct(overall)}{target_txt}")
+            stats = f"Completed: {done}/{total}"
+            if failed:
+                stats += f" · Failed: {failed}"
+            if running:
+                stats += f" · In progress: {running}"
+            if total_bytes > 0:
+                stats += f" · Data: {_human_size(done_bytes)}/{_human_size(total_bytes)}"
+            self.job_bar_stats.configure(text=stats)
+
+            if cur:
+                cur_txt = f"Current: {cur_name}"
+                if cur_idx is not None:
+                    cur_txt += f" ({cur_idx}/{total})"
+                cur_txt += f" · {_pct(cur_p)}"
+                if cur_p >= 0.90 and age_s >= 10:
+                    cur_txt += f" · Finalizing (no new progress {age_s}s)"
+                self.job_bar_current.configure(text=cur_txt)
+            else:
+                self.job_bar_current.configure(text="")
+
+            self.job_bar_progress.configure(value=max(0.0, min(100.0, overall * 100.0)))
+
+        # Collapse/expand
+        if self._job_bar_collapsed:
+            try:
+                self.job_bar_body.grid_remove()
             except Exception:
                 pass
-            return
-
-        targets = {self._target_by_path.get(p) for p in active}
-        targets.discard(None)
-        if len(targets) == 1:
-            target_txt = f" to {next(iter(targets))}"
+            self.job_bar_toggle.configure(text="Show")
         else:
-            target_txt = ""
-
-        total = len(active)
-        avg = 0.0
-        if total:
-            avg = sum(float(self._display_progress.get(p, self._progress.get(p, 0.0))) for p in active) / float(total)
-
-        # If progress stops updating near the end (common while ffmpeg finalizes/muxes),
-        # communicate that explicitly rather than looking frozen.
-        now = time.time()
-        last_ts = 0.0
-        for p in active:
-            last_ts = max(last_ts, float(self._last_progress_ts.get(p, 0.0)))
-        age_s = max(0, int(now - last_ts)) if last_ts else 0
-
-        label = f"Converting {total} file(s){target_txt}"
-        if avg >= 0.90 and age_s >= 10:
-            label = f"Finalizing {total} file(s){target_txt} (no new progress for {age_s}s)"
-
-        self.job_bar_label.configure(text=label)
-        self.job_bar_progress.configure(value=max(0.0, min(100.0, avg * 100.0)))
-        self.job_bar.grid()
+            try:
+                self.job_bar_body.grid()
+            except Exception:
+                pass
+            self.job_bar_toggle.configure(text="Hide")
 
     def _start_progress_animation(self) -> None:
         if self._animate_active:
@@ -1410,6 +1652,7 @@ class ConvertableApp:
         while True:
             src_path, target_ext = self._task_queue.get()
             try:
+                self._ui_events.put(("start", src_path, target_ext))
                 # Predict output paths so the user can find ffmpeg logs even if the job hangs.
                 expected_out = None
                 expected_ffmpeg_log = None
@@ -1460,7 +1703,12 @@ class ConvertableApp:
                 except queue.Empty:
                     break
                 kind = evt[0]
-                if kind == "progress":
+                if kind == "start":
+                    _k, path, target_ext = evt
+                    self._current_job_path = str(path)
+                    self._current_job_target = str(target_ext)
+                    changed = True
+                elif kind == "progress":
                     _k, path, v = evt
                     self._progress[path] = max(float(self._progress.get(path, 0.0)), float(v))
                     disp = float(self._display_progress.get(path, 0.0))
@@ -1477,6 +1725,10 @@ class ConvertableApp:
                     self._progress[path] = 1.0
                     self._display_progress[path] = 1.0
                     self._last_progress_ts[path] = time.time()
+                    self._queue_done.add(str(path))
+                    if self._current_job_path == str(path):
+                        self._current_job_path = None
+                        self._current_job_target = None
                     dropped = self._find_dropped_by_path(path)
                     self.results.append(
                         ConversionResultItem(
@@ -1495,6 +1747,10 @@ class ConvertableApp:
                         self._in_progress.remove(path)
                     # Keep whatever progress was last shown.
                     self._last_progress_ts[path] = time.time()
+                    self._queue_failed.add(str(path))
+                    if self._current_job_path == str(path):
+                        self._current_job_path = None
+                        self._current_job_target = None
                     name = Path(path).name
                     msg = str(_msg).strip() or "Unknown error"
                     self._debug_log(f"UI error: src={path} msg={msg}")
