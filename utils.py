@@ -6,6 +6,7 @@ import select
 import sys
 import tempfile
 import io
+import zipfile
 from pathlib import Path
 import threading
 import xml.etree.ElementTree as ET
@@ -286,9 +287,9 @@ def _center_crop_to_aspect(img: Image.Image, target_w: int, target_h: int) -> Im
 def _crop_thumbnail_to_target(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     """Crop a renderer thumbnail to the target aspect ratio using content bounds.
 
-    Content-aware crop: Quick Look can add uneven padding. Using a simple per-pixel
-    color from corners, find the bounding box of non-background pixels, then crop to the
-    target aspect ratio around the content center.
+    Quick Look can add uneven padding around SVG thumbnails. We detect and trim padding
+    per-side, then fit the trimmed content into the target size with padding (instead of
+    cropping to aspect, which can cut off artwork).
     """
     try:
         tw = int(target_w)
@@ -392,7 +393,30 @@ def _crop_thumbnail_to_target(img: Image.Image, target_w: int, target_h: int) ->
     bottom = min(h, int((bottom_s + 1) * inv) + pad)
 
     trimmed = rgba.crop((left, top, right, bottom))
-    return _center_crop_to_aspect(trimmed, tw, th)
+
+    # Fit + pad to target to avoid clipping.
+    twi, thi = int(tw), int(th)
+    if twi <= 0 or thi <= 0:
+        return trimmed
+
+    cw, ch = trimmed.size
+    if cw <= 0 or ch <= 0:
+        return trimmed
+
+    scale_fit = min(twi / float(cw), thi / float(ch))
+    new_w = max(1, int(round(cw * scale_fit)))
+    new_h = max(1, int(round(ch * scale_fit)))
+
+    resampling = getattr(Image, "Resampling", Image)
+    resample_filter = getattr(resampling, "LANCZOS", getattr(Image, "BICUBIC", 3))
+    resized = trimmed.resize((new_w, new_h), resample_filter)
+
+    # Transparent padding is safest for PNG/WebP; JPEG will be flattened later.
+    out = Image.new("RGBA", (twi, thi), (0, 0, 0, 0))
+    ox = int((twi - new_w) / 2)
+    oy = int((thi - new_h) / 2)
+    out.paste(resized, (ox, oy))
+    return out
 
 class ConversionCancelled(RuntimeError):
     pass
@@ -549,9 +573,10 @@ class FileConverter:
                                     if target_w and target_h and target_w > 0 and target_h > 0:
                                         try:
                                             img = _crop_thumbnail_to_target(img, int(target_w), int(target_h))
-                                            resampling = getattr(Image, "Resampling", Image)
-                                            resample_filter = getattr(resampling, "LANCZOS", getattr(Image, "BICUBIC", 3))
-                                            img = img.resize((int(target_w), int(target_h)), resample_filter)
+                                            if img.size != (int(target_w), int(target_h)):
+                                                resampling = getattr(Image, "Resampling", Image)
+                                                resample_filter = getattr(resampling, "LANCZOS", getattr(Image, "BICUBIC", 3))
+                                                img = img.resize((int(target_w), int(target_h)), resample_filter)
                                         except Exception:
                                             pass
                                     fmt = outputFiletype.upper().lstrip(".")
@@ -592,6 +617,125 @@ class FileConverter:
             # Pillow doesn't support HEIC/HEIF by default.
             # On macOS, use the built-in `sips` tool to transcode to PNG first.
             lower = inputFile.lower()
+            # PDF rasterization
+            # Multi-page: export each page as an image and package into a ZIP.
+            if lower.endswith(".pdf"):
+                if cancel and cancel():
+                    raise ConversionCancelled("Conversion cancelled")
+                if progress:
+                    progress(0.2)
+
+                out_ext = outputFiletype.lower().lstrip(".")
+                out_ext = "jpg" if out_ext == "jpeg" else out_ext
+
+                # Prefer PyMuPDF for reliable multi-page rendering.
+                try:
+                    import fitz  # type: ignore
+
+                    dpi = 200
+                    try:
+                        dpi = int(os.environ.get("CONVERTABLE_PDF_DPI", "200"))
+                    except Exception:
+                        dpi = 200
+                    dpi = max(72, min(600, dpi))
+
+                    with fitz.open(inputFile) as doc:
+                        page_count = int(doc.page_count)
+                        if page_count <= 0:
+                            raise RuntimeError("PDF has no pages")
+
+                        base = os.path.splitext(os.path.basename(inputFile))[0]
+                        zoom = float(dpi) / 72.0
+                        matrix = fitz.Matrix(zoom, zoom)
+
+                        if page_count > 1:
+                            zip_path = self.buildOutputPath(inputFile, "zip")
+                            with tempfile.TemporaryDirectory(prefix="convertable-pdf-") as td:
+                                tmp_paths: list[tuple[str, str]] = []  # (fs_path, arcname)
+                                for i in range(page_count):
+                                    if cancel and cancel():
+                                        raise ConversionCancelled("Conversion cancelled")
+                                    if progress:
+                                        progress(0.2 + 0.7 * (i / max(1, page_count)))
+
+                                    page = doc.load_page(i)
+                                    pix = page.get_pixmap(matrix=matrix, alpha=True)
+                                    mode = "RGBA" if pix.alpha else "RGB"
+                                    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+
+                                    if out_ext in {"jpg", "jpeg"}:
+                                        if img.mode == "RGBA":
+                                            bg = Image.new("RGB", img.size, (255, 255, 255))
+                                            bg.paste(img, mask=img.split()[-1])
+                                            img = bg
+                                        else:
+                                            img = img.convert("RGB")
+                                        save_ext = "jpg"
+                                        save_fmt = "JPEG"
+                                    elif out_ext == "png":
+                                        save_ext = "png"
+                                        save_fmt = "PNG"
+                                    elif out_ext in {"tif", "tiff"}:
+                                        save_ext = "tiff"
+                                        save_fmt = "TIFF"
+                                    else:
+                                        raise ValueError(
+                                            f"Unsupported PDF output format for ZIP export: {outputFiletype}"
+                                        )
+
+                                    name = f"{base}_page_{i+1:03d}.{save_ext}"
+                                    fs_path = os.path.join(td, name)
+                                    img.save(fs_path, format=save_fmt)
+                                    tmp_paths.append((fs_path, name))
+
+                                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                                    for fs_path, arcname in tmp_paths:
+                                        z.write(fs_path, arcname)
+
+                            if progress:
+                                progress(1.0)
+                            return zip_path
+
+                        # Single page -> normal image output
+                        page = doc.load_page(0)
+                        pix = page.get_pixmap(matrix=matrix, alpha=True)
+                        mode = "RGBA" if pix.alpha else "RGB"
+                        img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+                        fmt = outputFiletype.upper().lstrip(".")
+                        if fmt in {"JPEG", "JPG"}:
+                            if img.mode == "RGBA":
+                                bg = Image.new("RGB", img.size, (255, 255, 255))
+                                bg.paste(img, mask=img.split()[-1])
+                                img = bg
+                            else:
+                                img = img.convert("RGB")
+                        img.save(outputFile, format=fmt)
+                        if progress:
+                            progress(1.0)
+                        return outputFile
+
+                except ConversionCancelled:
+                    raise
+                except Exception:
+                    # Fallback: macOS `sips` can rasterize the first page only.
+                    if sys.platform == "darwin":
+                        sips_fmt = "jpeg" if out_ext in {"jpg", "jpeg"} else out_ext
+                        if sips_fmt in {"png", "jpeg", "tiff"}:
+                            proc = subprocess.run(
+                                ["sips", "-s", "format", sips_fmt, inputFile, "--out", outputFile],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                                check=False,
+                            )
+                            if proc.returncode == 0 and os.path.exists(outputFile):
+                                if progress:
+                                    progress(1.0)
+                                return outputFile
+                    raise RuntimeError(
+                        "PDF conversion requires PyMuPDF for multi-page ZIP export. Install PyMuPDF to enable this."
+                    )
+
             if sys.platform == "darwin" and (lower.endswith(".heic") or lower.endswith(".heif")):
                 if progress:
                     progress(0.2)
@@ -1019,6 +1163,11 @@ class FileConverter:
             inputExt = "svg"
             inputMime = "image/svg+xml"
             inputCategory = "image"
+        elif suffix == ".pdf":
+            # PDFs are "application/pdf" but we support rasterizing them as an image source.
+            inputExt = "pdf"
+            inputMime = "application/pdf"
+            inputCategory = "image"
         else:
             kind = ft.guess(inputFile)
             if kind is None:
@@ -1031,6 +1180,10 @@ class FileConverter:
                 inputExt = kind.extension
                 inputMime = kind.mime or ""
                 inputCategory = inputMime.split("/", 1)[0] if "/" in inputMime else None
+
+        # filetype/mimetypes report PDFs as application/*; treat as image for our rasterization path.
+        if inputExt == "pdf" or suffix == ".pdf":
+            inputCategory = "image"
 
         if not inputCategory:
             raise ValueError("Could not detect input file type.")

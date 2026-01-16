@@ -6,3 +6,4 @@ audioop-lts
 tkinterdnd2
 pyinstaller
 CairoSVG
+PyMuPDF
