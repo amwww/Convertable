@@ -58,6 +58,7 @@ class _ConvertTabAppBase(AppBase):
     _target_by_path: dict[str, str]
     _last_progress_ts: dict[str, float]
     _job_started_ts: dict[str, float]
+    _batch_started_ts: float | None
     _queue_paths: set[str]
     _queue_done: set[str]
     _queue_failed: set[str]
@@ -844,6 +845,7 @@ class ConvertTabMixin(_ConvertTabAppBase):
             self._queue_failed.clear()
             self._current_job_path = None
             self._current_job_target = None
+            self._batch_started_ts = None
 
         for src_path in sel:
             if src_path in self._in_progress:

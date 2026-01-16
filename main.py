@@ -33,7 +33,6 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from tabs import ConvertTabMixin, DropTabMixin, QueueTabMixin, ResultTabMixin
 
-
 class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixin):
     def __init__(self) -> None:
         """Initialize the main window, state, engine, and all UI tabs."""
@@ -57,6 +56,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self._animate_active: bool = False
         self._last_progress_ts: dict[str, float] = {}
         self._job_started_ts: dict[str, float] = {}
+        self._batch_started_ts: float | None = None
 
         # Background conversion engine (pending queue + worker threads).
         self.engine = ConversionEngine(output_dir_getter=lambda: self._output_dir, debug_log=self._debug_log)
@@ -186,7 +186,34 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         return self._source_category(dropped) is not None
 
     def _on_close(self) -> None:
-        """Handle app shutdown (stop engine, terminate ffmpeg, cleanup temp files)."""
+        """Handle app shutdown (confirm if converting, then cleanup + exit)."""
+
+        # If a conversion is actively running, warn before exiting.
+        try:
+            pending_count, active_workers = self.engine.worker_stats()
+        except Exception:
+            pending_count, active_workers = 0, 0
+
+        if int(active_workers) > 0:
+            try:
+                msg = (
+                    "A conversion is currently running.\n\n"
+                    "Closing the app will cancel the active conversion."
+                )
+                if int(pending_count) > 0:
+                    msg += f"\n\nPending in queue: {int(pending_count)}"
+                msg += "\n\nQuit anyway?"
+                ok = messagebox.askyesno("Quit Convertable?", msg, parent=self.root)
+            except Exception:
+                ok = True
+
+            if not ok:
+                try:
+                    self._debug_log("Close cancelled by user (conversion running)")
+                except Exception:
+                    pass
+                return
+
         try:
             self._debug_log("App closing")
             try:
@@ -607,6 +634,21 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         def _pct(x: float) -> str:
             return f"{int(max(0.0, min(1.0, x)) * 100)}%"
 
+        def _fmt_duration(seconds: float | int | None) -> str:
+            """Format a duration in seconds as m:ss or h:mm:ss."""
+            if seconds is None:
+                return "--"
+            try:
+                s = int(max(0, float(seconds)))
+            except Exception:
+                return "--"
+            hh = s // 3600
+            mm = (s % 3600) // 60
+            ss = s % 60
+            if hh > 0:
+                return f"{hh}:{mm:02d}:{ss:02d}"
+            return f"{mm}:{ss:02d}"
+
         # Derive target label when consistent.
         targets = {self._target_by_path.get(p) for p in self._queue_paths}
         targets.discard(None)
@@ -652,6 +694,30 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 stats += f" · Workers: {active_workers}/{worker_limit} ({mode})"
             if total_bytes > 0:
                 stats += f" · Data: {human_size(done_bytes)}/{human_size(total_bytes)}"
+
+            # Timing/ETA (best-effort): derive from batch start and overall progress.
+            elapsed_s: float | None = None
+            if self._batch_started_ts:
+                elapsed_s = max(0.0, now - float(self._batch_started_ts))
+            else:
+                # Fallback: use the earliest per-file start timestamp we have.
+                starts = [float(self._job_started_ts.get(p, 0.0)) for p in self._queue_paths]
+                starts = [t for t in starts if t > 0]
+                if starts:
+                    elapsed_s = max(0.0, now - min(starts))
+
+            if running or pending_count:
+                if elapsed_s is not None:
+                    stats += f" · Elapsed: {_fmt_duration(elapsed_s)}"
+                if overall > 0.02 and elapsed_s is not None and overall < 1.0:
+                    eta_s = elapsed_s * ((1.0 - overall) / max(1e-6, overall))
+                    # Avoid absurd numbers when progress is tiny.
+                    if 0 <= eta_s <= 7 * 24 * 3600:
+                        stats += f" · ETA: {_fmt_duration(eta_s)}"
+                    else:
+                        stats += " · ETA: --"
+                elif running or pending_count:
+                    stats += " · ETA: --"
             stats_text = stats
 
             if cur:
@@ -663,6 +729,14 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                     cur_txt += f" · +{running - 1} more"
                 if cur_p >= 0.90 and age_s >= 10:
                     cur_txt += f" · Finalizing (no new progress {age_s}s)"
+
+                # Per-file runtime (uses queue-time as a fallback start).
+                try:
+                    started = float(self._job_started_ts.get(cur, 0.0))
+                except Exception:
+                    started = 0.0
+                if started > 0:
+                    cur_txt += f" · Running: {_fmt_duration(now - started)}"
                 current_text = cur_txt
             else:
                 current_text = ""
@@ -755,6 +829,8 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 kind = evt[0]
                 if kind == "start":
                     _k, path, target_ext = evt
+                    if self._batch_started_ts is None:
+                        self._batch_started_ts = time.time()
                     self._current_job_target = str(target_ext)
                     self._sync_queue_order_for_processing()
                     changed = True
