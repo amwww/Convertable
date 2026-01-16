@@ -19,6 +19,12 @@ class ConversionEngine:
         output_dir_getter: Callable[[], str],
         debug_log: Callable[[str], None],
     ) -> None:
+        """Create a conversion engine.
+
+        Args:
+            output_dir_getter: Callable returning the current output directory.
+            debug_log: Callable used for engine/worker diagnostic logging.
+        """
         self._output_dir_getter = output_dir_getter
         self._debug_log = debug_log
 
@@ -40,15 +46,18 @@ class ConversionEngine:
 
     @property
     def shutdown_event(self) -> threading.Event:
+        """A threading event that is set when the engine is shutting down."""
         return self._shutdown
 
     def start(self) -> None:
+        """Start the primary worker thread (idempotent)."""
         if self._worker is not None and self._worker.is_alive():
             return
         self._worker = threading.Thread(target=self._conversion_worker, daemon=True)
         self._worker.start()
 
     def stop(self) -> None:
+        """Signal shutdown and wake any waiting workers."""
         try:
             self._shutdown.set()
         except Exception:
@@ -60,11 +69,13 @@ class ConversionEngine:
             pass
 
     def enqueue(self, src_path: str, target_ext: str) -> None:
+        """Queue a conversion of `src_path` to `target_ext`."""
         with self._pending_cv:
             self._pending_tasks.append((src_path, target_ext))
             self._pending_cv.notify_all()
 
     def remove_pending(self, paths: set[str]) -> None:
+        """Remove queued (not-yet-started) tasks whose source path is in `paths`."""
         try:
             with self._pending_cv:
                 self._pending_tasks = [(p, t) for (p, t) in self._pending_tasks if p not in paths]
@@ -73,6 +84,7 @@ class ConversionEngine:
             pass
 
     def reorder_pending(self, from_idx: int, to_idx: int) -> None:
+        """Move a pending task from `from_idx` to `to_idx` (queue reorder)."""
         with self._pending_cv:
             if from_idx < 0 or to_idx < 0:
                 return
@@ -83,6 +95,7 @@ class ConversionEngine:
             self._pending_cv.notify_all()
 
     def pending_snapshot(self) -> list[tuple[str, str]]:
+        """Return a snapshot of pending tasks as `(src_path, target_ext)` pairs."""
         try:
             with self._pending_cv:
                 return list(self._pending_tasks)
@@ -98,6 +111,7 @@ class ConversionEngine:
             return 0, 0
 
     def worker_limit(self) -> int:
+        """Return the current parallel worker limit (1 = sequential)."""
         try:
             with self._pending_cv:
                 return int(self._parallel_limit)
@@ -105,6 +119,7 @@ class ConversionEngine:
             return 1
 
     def get_event_nowait(self) -> tuple:
+        """Return the next UI event from the worker, or raise `queue.Empty`."""
         return self._ui_events.get_nowait()
 
     def enable_parallel_one_shot(self) -> None:
@@ -144,6 +159,7 @@ class ConversionEngine:
             pass
 
     def _conversion_worker(self, is_extra: bool = False) -> None:
+        """Worker loop: pull from pending queue, run conversion, emit UI events."""
         while True:
             with self._pending_cv:
                 while True:
@@ -196,6 +212,7 @@ class ConversionEngine:
                 last_log_t = time.time()
 
                 def _progress_cb(v: float) -> None:
+                    """Progress callback passed down into the converter."""
                     self._ui_events.put(("progress", src_path, float(v)))
                     nonlocal last_logged, last_log_t
                     now = time.time()

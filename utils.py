@@ -1,3 +1,10 @@
+"""Conversion utilities for Convertable.
+
+This module implements the actual file conversion work for images, audio, and video.
+It also contains some helper logic for SVG/PDF rasterization and ffmpeg progress
+tracking, which is used by the background conversion engine.
+"""
+
 import os
 import mimetypes
 import subprocess
@@ -24,6 +31,7 @@ _ACTIVE_PROCS_LOCK = threading.Lock()
 
 
 def _register_active_proc(proc: subprocess.Popen) -> None:
+    """Track a subprocess so it can be terminated on app shutdown."""
     try:
         with _ACTIVE_PROCS_LOCK:
             _ACTIVE_PROCS.add(proc)
@@ -32,6 +40,7 @@ def _register_active_proc(proc: subprocess.Popen) -> None:
 
 
 def _unregister_active_proc(proc: subprocess.Popen) -> None:
+    """Untrack a previously registered subprocess."""
     try:
         with _ACTIVE_PROCS_LOCK:
             _ACTIVE_PROCS.discard(proc)
@@ -304,41 +313,64 @@ def _crop_thumbnail_to_target(img: Image.Image, target_w: int, target_h: int) ->
     if w <= 0 or h <= 0:
         return img
 
+    resampling = getattr(Image, "Resampling", Image)
+    bilinear = getattr(resampling, "BILINEAR", getattr(Image, "BILINEAR", 2))
+
+    def _as_rgba(p: object) -> tuple[int, int, int, int]:
+        """Normalize a Pillow pixel value to an RGBA tuple."""
+        if isinstance(p, tuple):
+            if len(p) == 4:
+                return (int(p[0]), int(p[1]), int(p[2]), int(p[3]))
+            if len(p) == 3:
+                return (int(p[0]), int(p[1]), int(p[2]), 255)
+        if isinstance(p, (int, float)):
+            v = int(p)
+            return (v, v, v, 255)
+        return (0, 0, 0, 0)
+
     # Detect padding per-side (Quick Look can pad unevenly, e.g. only on the right).
     try:
-        small = rgba.resize((128, 128), Image.BILINEAR)
+        small = rgba.resize((128, 128), bilinear)
         sw, sh = small.size
         band = max(1, min(12, int(min(sw, sh) * 0.08)))
         spx = small.load()
 
-        def _mode(pixels: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+        if spx is None:
+            raise RuntimeError("Pillow pixel access unavailable")
+
+        def _mode(pixels: list[object]) -> tuple[int, int, int, int]:
             if not pixels:
-                return rgba.getpixel((0, 0))
+                return _as_rgba(rgba.getpixel((0, 0)))
             counts: dict[tuple[int, int, int, int], int] = {}
             for p in pixels:
-                counts[p] = counts.get(p, 0) + 1
-            return max(counts, key=counts.get)
+                key = _as_rgba(p)
+                counts[key] = counts.get(key, 0) + 1
+            return max(counts.items(), key=lambda kv: kv[1])[0]
 
         left_bg = _mode([spx[x, y] for x in range(band) for y in range(sh)])
         right_bg = _mode([spx[sw - 1 - x, y] for x in range(band) for y in range(sh)])
         top_bg = _mode([spx[x, y] for y in range(band) for x in range(sw)])
         bottom_bg = _mode([spx[x, sh - 1 - y] for y in range(band) for x in range(sw)])
     except Exception:
-        left_bg = right_bg = top_bg = bottom_bg = rgba.getpixel((0, 0))
+        left_bg = right_bg = top_bg = bottom_bg = _as_rgba(rgba.getpixel((0, 0)))
 
     max_scan = 512
     scale = min(1.0, max_scan / max(w, h))
     dw = max(1, int(w * scale))
     dh = max(1, int(h * scale))
-    scan = rgba.resize((dw, dh), Image.BILINEAR)
+    scan = rgba.resize((dw, dh), bilinear)
     px = scan.load()
+
+    if px is None:
+        return _center_crop_to_aspect(rgba, tw, th)
 
     tol = 18
     min_frac = 0.01
     step = 2
 
-    def _like(p: tuple[int, int, int, int], bg: tuple[int, int, int, int]) -> bool:
-        return max(abs(p[0] - bg[0]), abs(p[1] - bg[1]), abs(p[2] - bg[2])) <= tol
+    def _like(p: object, bg: tuple[int, int, int, int]) -> bool:
+        pp = _as_rgba(p)
+        return max(abs(pp[0] - bg[0]), abs(pp[1] - bg[1]), abs(pp[2] - bg[2])) <= tol
 
     def _col_not_bg_frac(x: int, bg: tuple[int, int, int, int]) -> float:
         cnt = 0
@@ -419,16 +451,20 @@ def _crop_thumbnail_to_target(img: Image.Image, target_w: int, target_h: int) ->
     return out
 
 class ConversionCancelled(RuntimeError):
+    """Raised when the caller requests cancellation via the `cancel` callback."""
     pass
 
 class FileConverter:
     def __init__(self, outputPath: str):
+        """Create a converter that writes outputs into `outputPath`."""
         self.outputPath = outputPath
 
     def ensureOutputPath(self):
+        """Create the output directory if it does not exist."""
         os.makedirs(self.outputPath, exist_ok=True)
 
     def buildOutputPath(self, inputFile: str, outputFiletype: str) -> str:
+        """Build a non-colliding output path for `inputFile` in the output directory."""
         base = os.path.splitext(os.path.basename(inputFile))[0]
         ext = outputFiletype.lower().lstrip('.')
         candidate = os.path.join(self.outputPath, f"{base}.{ext}")
@@ -448,6 +484,13 @@ class FileConverter:
         progress: ProgressCallback | None = None,
         cancel: CancelCallback | None = None,
     ) -> str:
+        """Convert an image file to another image format.
+
+        Supports raster formats via Pillow; special-cases:
+        - SVG: rasterizes via CairoSVG (preferred) or macOS Quick Look fallback.
+        - PDF: rasterizes via PyMuPDF (multi-page -> ZIP) or macOS `sips` fallback.
+        - HEIC/HEIF (macOS): transcodes via `sips` before saving.
+        """
         self.ensureOutputPath()
         if cancel and cancel():
             raise ConversionCancelled("Conversion cancelled")
@@ -775,6 +818,7 @@ class FileConverter:
         progress: ProgressCallback | None = None,
         cancel: CancelCallback | None = None,
     ) -> str:
+        """Convert an audio file to another audio format using ffmpeg."""
         self.ensureOutputPath()
         if cancel and cancel():
             raise ConversionCancelled("Conversion cancelled")
@@ -833,6 +877,10 @@ class FileConverter:
         progress: ProgressCallback | None = None,
         cancel: CancelCallback | None = None,
     ) -> str:
+        """Convert a video file to another video format.
+
+        Prefers ffmpeg (with progress) for MP4/M4V; otherwise falls back to MoviePy.
+        """
         self.ensureOutputPath()
         if cancel and cancel():
             raise ConversionCancelled("Conversion cancelled")
@@ -895,6 +943,7 @@ class FileConverter:
         return outputFile
 
     def _get_ffmpeg_exe(self) -> str:
+        """Return the ffmpeg executable path (imageio_ffmpeg when available)."""
         # Prefer MoviePy/imageio-managed ffmpeg binary when available.
         try:
             import imageio_ffmpeg  # type: ignore
@@ -907,6 +956,7 @@ class FileConverter:
         return "ffmpeg"
 
     def _get_ffprobe_exe(self, ffmpeg_exe: str) -> str:
+        """Return the ffprobe executable path matching the given ffmpeg executable."""
         # Try sibling ffprobe next to ffmpeg path.
         try:
             p = Path(ffmpeg_exe)
@@ -920,6 +970,7 @@ class FileConverter:
         return "ffprobe"
 
     def _ffprobe_duration_seconds(self, ffmpeg_exe: str, inputFile: str) -> float | None:
+        """Return media duration in seconds via ffprobe, or None if unknown."""
         ffprobe = self._get_ffprobe_exe(ffmpeg_exe)
         cmd = [
             ffprobe,
@@ -946,6 +997,11 @@ class FileConverter:
         progress: ProgressCallback | None,
         cancel: CancelCallback | None = None,
     ) -> None:
+        """Run ffmpeg and translate `-progress pipe:1` output into a 0..1 progress callback.
+
+        Also writes a small `.ffmpeg.log` next to the output file to help debug
+        failures/hangs.
+        """
         def _parse_hhmmss(s: str) -> float | None:
             try:
                 parts = s.split(":")
@@ -1156,6 +1212,7 @@ class FileConverter:
         progress: ProgressCallback | None = None,
         cancel: CancelCallback | None = None,
     ) -> str:
+        """Convert a file based on detected source category and desired output extension."""
         # filetype.guess() does not reliably detect some text-based formats (e.g. SVG).
         input_path = Path(inputFile)
         suffix = input_path.suffix.lower()

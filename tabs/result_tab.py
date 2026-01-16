@@ -17,10 +17,8 @@ from tkinterdnd2 import DND_FILES
 
 from tabs._typing_base import AppBase
 
-
 if TYPE_CHECKING:
     from tkinter.font import Font
-
 
 class _ResultTabAppBase(AppBase):
     """Typing-only base for the Result tab mixin.

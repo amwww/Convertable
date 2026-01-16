@@ -1,3 +1,9 @@
+"""Convertable: Tkinter drag-and-drop file converter.
+
+`ConvertableApp` owns the window, session state, and shared UI behaviors.
+Tab-specific UI code lives in `tabs/` as mixins.
+"""
+
 import os
 import sys
 import tkinter
@@ -30,6 +36,7 @@ from tabs import ConvertTabMixin, DropTabMixin, QueueTabMixin, ResultTabMixin
 
 class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixin):
     def __init__(self) -> None:
+        """Initialize the main window, state, engine, and all UI tabs."""
         self.root = TkinterDnD.Tk()
         self.root.title("Convertable")
         self.root.geometry("900x560")
@@ -147,6 +154,10 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _source_category(self, dropped: DroppedFile | None) -> str | None:
+        """Return a coarse category for a dropped file.
+
+        Returns: "image", "audio", "video", or `None` if unsupported.
+        """
         # None means unsupported / not convertible.
         if dropped is None:
             return None
@@ -171,9 +182,11 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         return None
 
     def _is_source_supported(self, dropped: DroppedFile | None) -> bool:
+        """Return True if the given dropped file is convertible."""
         return self._source_category(dropped) is not None
 
     def _on_close(self) -> None:
+        """Handle app shutdown (stop engine, terminate ffmpeg, cleanup temp files)."""
         try:
             self._debug_log("App closing")
             try:
@@ -192,6 +205,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
             self.root.destroy()
 
     def _debug_log(self, msg: str) -> None:
+        """Write a message to the persistent debug log file."""
         try:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(self._debug_log_path, "a", encoding="utf-8") as fp:
@@ -201,12 +215,14 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
 
     # -------------------- Shared --------------------
     def _find_dropped_by_path(self, path: str) -> DroppedFile | None:
+        """Look up a dropped file model by absolute path."""
         for f in self.dropped:
             if f.path == path:
                 return f
         return None
 
     def _on_drop(self, event) -> None:
+        """Handle OS drag-and-drop onto the window."""
         files = parse_dnd_files(self.root, event.data)
 
         # Add unique paths only.
@@ -224,10 +240,12 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
             self._scroll_to_path(new_paths[0])
 
     def _refresh_all_lists(self) -> None:
+        """Refresh the main lists after state changes."""
         self._refresh_convert_list()
         self._refresh_result_list()
 
     def _refresh_convert_list(self) -> None:
+        """Rebuild the Convert list from `self.dropped` and current selection."""
         # Clear existing rows
         for child in list(self.convert_list_frame.winfo_children()):
             child.destroy()
@@ -322,6 +340,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self._update_job_bar()
 
     def _find_latest_result_index_for_source(self, source_path: str) -> int | None:
+        """Return the newest result index for a given source path, if any."""
         for idx in range(len(self.results) - 1, -1, -1):
             try:
                 if self.results[idx].source_path == source_path:
@@ -331,6 +350,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         return None
 
     def _scroll_to_result_index(self, idx: int) -> None:
+        """Scroll the Result list to make row `idx` visible."""
         if idx < 0 or idx >= len(self._result_rows):
             return
         row = self._result_rows[idx]
@@ -346,6 +366,11 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
             pass
 
     def _on_convert_row_double_click(self, source_path: str) -> None:
+        """Handle double-click on a Convert row.
+
+        If a result already exists for the source, jump to it; otherwise queue a
+        conversion for that single file.
+        """
         # If we've already produced a converted output for this source, jump to it.
         idx = self._find_latest_result_index_for_source(source_path)
         if idx is not None:
@@ -368,6 +393,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self._queue_conversion()
 
     def _show_convert_context_menu(self, event, path: str) -> None:
+        """Show a small context menu for a Convert row."""
         menu: tkinter.Menu | None = None
         try:
             menu = tkinter.Menu(self.root, tearoff=0)
@@ -381,6 +407,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 pass
 
     def _reveal_in_finder(self, path: str) -> None:
+        """Reveal a file in Finder (macOS) or best-effort on other OSes."""
         if sys.platform == "darwin":
             subprocess.run(["open", "-R", path], check=False)
             return
@@ -391,6 +418,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
             pass
 
     def _scroll_to_path(self, path: str) -> None:
+        """Scroll the Convert list to bring `path` into view."""
         widgets = self._convert_rows.get(path)
         if not widgets:
             return
@@ -408,6 +436,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self.convert_canvas.yview_moveto(y / height)
 
     def _on_row_click(self, event, path: str) -> None:
+        """Update selection based on click modifiers (shift/cmd/ctrl)."""
         f = self._find_dropped_by_path(path)
         if f is not None and not self._is_source_supported(f):
             return
@@ -441,12 +470,13 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self._set_selected_paths([path])
 
     def _load_remove_icon(self) -> tkinter.PhotoImage:
+        """Load the small "X" icon used to remove a file from the Convert list."""
         base_dir = resource_base_dir()
         svg_path = base_dir / "assets" / "x.svg"
 
         # Try to render the SVG using CairoSVG (preferred).
         try:
-            import cairosvg  # type: ignore
+            import cairosvg
 
             svg_text = svg_path.read_text(encoding="utf-8")
             svg_text = svg_text.replace("rgba(0, 0, 0, 1)", "rgba(255, 0, 0, 1)")
@@ -471,6 +501,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         return img
 
     def _refresh_result_list(self) -> None:
+        """Rebuild the Result list rows for the current `self.results`."""
         # Clear existing rows
         for child in list(self.result_list_frame.winfo_children()):
             child.destroy()
@@ -522,11 +553,15 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
 
             # Drag-out support per row
             try:
-                row_canvas.drag_source_register(DND_FILES)  # type: ignore[attr-defined]
-                def _drag_init(e, i=idx):
-                    return self._on_result_drag_init(e, i)
+                drag_source_register = getattr(row_canvas, "drag_source_register", None)
+                dnd_bind = getattr(row_canvas, "dnd_bind", None)
+                if callable(drag_source_register) and callable(dnd_bind):
+                    drag_source_register(DND_FILES)
 
-                row_canvas.dnd_bind("<<DragInitCmd>>", _drag_init)  # type: ignore[attr-defined]
+                    def _drag_init(e, i=idx):
+                        return self._on_result_drag_init(e, i)
+
+                    dnd_bind("<<DragInitCmd>>", _drag_init)
             except Exception:
                 pass
 
@@ -534,10 +569,12 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self._refresh_result_row_visuals()
 
     def _refresh_convert_progress(self) -> None:
+        """Refresh Convert visuals after progress/state changes."""
         self._refresh_row_visuals()
         self._update_job_bar()
 
     def _update_job_bar(self) -> None:
+        """Update the queue/job summary cards shown on Convert + Queue tabs."""
         total = len(self._queue_paths)
         done = len(self._queue_done)
         failed = len(self._queue_failed)
@@ -671,12 +708,14 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                     pass
 
     def _start_progress_animation(self) -> None:
+        """Start the periodic progress UI tick if not already running."""
         if self._animate_active:
             return
         self._animate_active = True
         self.root.after(60, self._tick_progress_animation)
 
     def _tick_progress_animation(self) -> None:
+        """Progress animation tick: ease displayed progress toward real progress."""
         try:
             # Periodic refresh while jobs are running.
             # NOTE: We intentionally do NOT "smooth fill" progress here because it makes
@@ -704,6 +743,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
             self.root.after(120, self._tick_progress_animation)
 
     def _process_ui_events(self) -> None:
+        """Apply conversion-engine events to UI state on the Tk thread."""
         try:
             # Drain UI events from worker thread.
             changed = False
@@ -792,6 +832,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 self.root.after(60, self._process_ui_events)
 
     def _on_tk_exception(self, exc, val, tb) -> None:
+        """Global Tk callback exception hook (prevents silent UI loop death)."""
         try:
             import traceback
 
@@ -801,9 +842,11 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         print("[Convertable] Tk callback exception:\n" + text)
 
     def run(self) -> None:
+        """Run the application (Tk main loop)."""
         self.root.mainloop()
 
 def create_window() -> None:
+    """CLI entry point."""
     ConvertableApp().run()
 
 if __name__ == "__main__":
