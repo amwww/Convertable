@@ -31,11 +31,15 @@ from models import ConversionJob, ConversionResultItem, DroppedFile
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-from tabs import ConvertTabMixin, DropTabMixin, QueueTabMixin, ResultTabMixin
+from tabs import ConvertTabMixin, QueueTabMixin, ResultTabMixin
 
-class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixin):
+class ConvertableApp(ConvertTabMixin, QueueTabMixin, ResultTabMixin):
     def __init__(self) -> None:
         """Initialize the main window, state, engine, and all UI tabs."""
+        # Enable extra UI diagnostics by launching with CONVERTABLE_UI_DEBUG=1.
+        _ui_dbg_raw = str(os.environ.get("CONVERTABLE_UI_DEBUG", "")).strip().lower()
+        self._ui_debug: bool = _ui_dbg_raw not in {"", "0", "false", "no", "off"} or ("--ui-debug" in sys.argv)
+
         self.root = TkinterDnD.Tk()
         self.root.title("Convertable")
         self.root.geometry("900x560")
@@ -88,6 +92,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         except Exception:
             pass
         self._debug_log(f"App start; session_output_dir={self._session_output_dir}")
+        self._debug_log(f"UI debug enabled={self._ui_debug} (CONVERTABLE_UI_DEBUG={_ui_dbg_raw!r})")
 
         self.remove_icon = self._load_remove_icon()
 
@@ -133,17 +138,14 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
 
-        self.drop_frame = ttk.Frame(self.notebook)
         self.convert_frame = ttk.Frame(self.notebook)
         self.queue_frame = ttk.Frame(self.notebook)
         self.result_frame = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.drop_frame, text="Drop")
         self.notebook.add(self.convert_frame, text="Convert")
         self.notebook.add(self.queue_frame, text="Queue")
         self.notebook.add(self.result_frame, text="Result")
 
-        self._build_drop_tab()
         self._build_convert_tab()
         self._build_queue_tab()
         self._build_result_tab()
@@ -360,11 +362,22 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
 
         self._update_convert_selection_ui()
         self.convert_canvas.update_idletasks()
-        self._layout_convert_rows(self.convert_canvas.winfo_width())
+        width = int(self.convert_canvas.winfo_width()) if hasattr(self, "convert_canvas") else 0
+        # When the notebook tab is still laying out, Tk can briefly report a tiny width
+        # (e.g. 1px). Rendering at that size moves all text off-canvas.
+        if width <= 50:
+            width = 900
+        self._layout_convert_rows(width)
         self.convert_canvas.configure(scrollregion=self.convert_canvas.bbox("all"))
 
         self._refresh_row_visuals()
         self._update_job_bar()
+
+        # Show empty placeholder when there are no dropped items.
+        try:
+            self._update_convert_empty_state()
+        except Exception:
+            pass
 
     def _find_latest_result_index_for_source(self, source_path: str) -> int | None:
         """Return the newest result index for a given source path, if any."""
@@ -444,6 +457,89 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         except Exception:
             pass
 
+    def _open_logs(self) -> None:
+        """Open log locations (debug log + ffmpeg/session logs) in the OS.
+
+        - Always opens the persistent debug log file.
+        - Opens the session output folder (where per-job `.ffmpeg.log` files live).
+        - If an ffmpeg log exists, also opens the newest one.
+        """
+
+        def _open_path(p: str) -> None:
+            if not p:
+                return
+            try:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+                if sys.platform.startswith("win"):
+                    os.startfile(p)  # type: ignore[attr-defined]
+                    return
+                subprocess.Popen(["xdg-open", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                try:
+                    self._debug_log(f"Open logs failed: path={p} err={e}")
+                except Exception:
+                    pass
+
+        # 1) Persistent debug log file
+        dbg = getattr(self, "_debug_log_path", "")
+        if isinstance(dbg, str) and dbg:
+            _open_path(dbg)
+
+        # 2) Session output dir (contains ffmpeg logs)
+        sess = getattr(self, "_session_output_dir", "")
+        if isinstance(sess, str) and sess and os.path.isdir(sess):
+            _open_path(sess)
+
+            # 3) Newest ffmpeg log (if present)
+            newest: str | None = None
+            newest_mtime = -1.0
+            try:
+                for fp in Path(sess).glob("*.ffmpeg.log"):
+                    try:
+                        mt = fp.stat().st_mtime
+                    except Exception:
+                        mt = 0.0
+                    if mt > newest_mtime:
+                        newest_mtime = mt
+                        newest = str(fp)
+            except Exception:
+                newest = None
+
+            if newest and os.path.exists(newest):
+                _open_path(newest)
+
+        # If nothing exists, show a gentle hint.
+        if not (isinstance(dbg, str) and dbg and os.path.exists(dbg)) and not (isinstance(sess, str) and sess and os.path.isdir(sess)):
+            try:
+                messagebox.showinfo(
+                    "Logs",
+                    "No log locations are available yet.\n\n"
+                    "Try running a conversion first, then open Logs again.",
+                    parent=self.root,
+                )
+            except Exception:
+                pass
+
+        # Convenience: allow enabling UI debug without needing env vars.
+        if not getattr(self, "_ui_debug", False):
+            try:
+                ok = messagebox.askyesno(
+                    "UI Debug",
+                    "Enable extra UI debug logging for this session?\n\n"
+                    "This helps diagnose rendering issues (selection/progress backgrounds).",
+                    parent=self.root,
+                )
+                if ok:
+                    self._ui_debug = True
+                    try:
+                        self._debug_log("UI debug enabled via Logs button")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     def _scroll_to_path(self, path: str) -> None:
         """Scroll the Convert list to bring `path` into view."""
         widgets = self._convert_rows.get(path)
@@ -467,6 +563,12 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
         f = self._find_dropped_by_path(path)
         if f is not None and not self._is_source_supported(f):
             return
+
+        if getattr(self, "_ui_debug", False):
+            try:
+                self._debug_log(f"UI click convert-row: path={path} state={getattr(event, 'state', None)}")
+            except Exception:
+                pass
 
         # Multi-select support:
         # - Click: select single
@@ -540,7 +642,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 self.selected_result_index = None
 
         width = self.result_canvas.winfo_width() if hasattr(self, "result_canvas") else 0
-        if width <= 0:
+        if width <= 50:
             width = 900
 
         row_h = 34
@@ -567,6 +669,7 @@ class ConvertableApp(DropTabMixin, ConvertTabMixin, QueueTabMixin, ResultTabMixi
                 "t_output": t_output,
                 "sep": sep,
             }
+
             self._result_rows.append(row_data)
 
             def _click(_e, i=idx) -> None:

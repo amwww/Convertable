@@ -6,7 +6,14 @@ from pathlib import Path
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
-from tabs._typing_base import AppBase
+if __name__ == "__main__":
+    raise SystemExit(
+        "This module is part of the 'tabs' package and is not meant to be run directly.\n"
+        "Run the app from the project root with: python main.py"
+    )
+from ._typing_base import AppBase
+
+
 
 if TYPE_CHECKING:
     from tkinter.font import Font
@@ -53,7 +60,19 @@ class _QueueTabAppBase(AppBase):
     # Shared helpers implemented by the main app (or other mixins)
     def _toggle_job_bar(self) -> None: ...
     def _update_job_bar(self) -> None: ...
-    def _rounded_rect(self, c: tkinter.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kwargs) -> int: ...
+    def _open_logs(self) -> None: ...
+    if TYPE_CHECKING:
+        # Provided by another mixin at runtime (currently ResultTabMixin).
+        def _rounded_rect(
+            self,
+            c: tkinter.Canvas,
+            x1: int,
+            y1: int,
+            x2: int,
+            y2: int,
+            r: int,
+            **kwargs,
+        ) -> int: ...
     @staticmethod
     def _blend_hex(fg: str, bg: str, alpha: float) -> str: ...
     def _ellipsize(self, text: str, max_px: int) -> str: ...
@@ -81,8 +100,11 @@ class QueueTabMixin(_QueueTabAppBase):
         self.queue_bar_label = ttk.Label(header, text="Queue")
         self.queue_bar_label.grid(row=0, column=0, sticky="w")
 
+        self.queue_bar_logs = ttk.Button(header, text="Logs", width=7, command=self._open_logs)
+        self.queue_bar_logs.grid(row=0, column=1, sticky="e", padx=(0, 8))
+
         self.queue_bar_toggle = ttk.Button(header, text="Hide", width=7, command=self._toggle_job_bar)
-        self.queue_bar_toggle.grid(row=0, column=1, sticky="e")
+        self.queue_bar_toggle.grid(row=0, column=2, sticky="e")
 
         self.queue_bar_body = ttk.Frame(self.queue_bar)
         self.queue_bar_body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
@@ -174,6 +196,8 @@ class QueueTabMixin(_QueueTabAppBase):
 
     def _layout_queue_rows(self, width: int) -> None:
         """Re-render each queue row for the given list width."""
+        if width <= 50:
+            width = 900
         rows = getattr(self, "_queue_rows", None)
         if not isinstance(rows, list):
             return
@@ -549,7 +573,10 @@ class QueueTabMixin(_QueueTabAppBase):
 
         try:
             self.queue_canvas.update_idletasks()
-            self._layout_queue_rows(self.queue_canvas.winfo_width())
+            w = int(self.queue_canvas.winfo_width()) if hasattr(self, "queue_canvas") else 0
+            if w <= 50:
+                w = 900
+            self._layout_queue_rows(w)
             self.queue_canvas.configure(scrollregion=self.queue_canvas.bbox("all"))
         except Exception:
             pass

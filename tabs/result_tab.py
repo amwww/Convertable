@@ -15,7 +15,7 @@ from tkinter import ttk
 from models import ConversionResultItem
 from tkinterdnd2 import DND_FILES
 
-from tabs._typing_base import AppBase
+from ._typing_base import AppBase
 
 if TYPE_CHECKING:
     from tkinter.font import Font
@@ -149,8 +149,11 @@ class ResultTabMixin(_ResultTabAppBase):
 
     def _on_result_canvas_configure(self, event) -> None:
         """Reflow result rows when the tab resizes."""
-        self.result_canvas.itemconfigure(self._result_list_window, width=event.width)
-        self._layout_result_rows(event.width)
+        w = int(getattr(event, "width", 0) or 0)
+        if w <= 50:
+            w = 900
+        self.result_canvas.itemconfigure(self._result_list_window, width=w)
+        self._layout_result_rows(w)
 
     def _rounded_rect(self, c: tkinter.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kwargs) -> int:
         """Draw a rounded rectangle on a Tk canvas and return the item id."""
@@ -173,6 +176,8 @@ class ResultTabMixin(_ResultTabAppBase):
 
     def _layout_result_rows(self, width: int) -> None:
         """Re-render each result row for the given list width."""
+        if width <= 50:
+            width = 900
         for row in self._result_rows:
             c = row.get("canvas")
             if not isinstance(c, tkinter.Canvas):
@@ -233,6 +238,27 @@ class ResultTabMixin(_ResultTabAppBase):
             except Exception:
                 pass
 
+            if getattr(self, "_ui_debug", False):
+                try:
+                    bbox = c.bbox(sel_id)
+                except Exception:
+                    bbox = None
+                try:
+                    fill = c.itemcget(sel_id, "fill")
+                except Exception:
+                    fill = None
+                try:
+                    bg = c.cget("bg")
+                except Exception:
+                    bg = None
+                try:
+                    self._debug_log(
+                        f"UI result select: idx={idx} canvas_w={c.winfo_width()} arg_w={width} "
+                        f"sel_id={sel_id} bbox={bbox} fill={fill} bg={bg}"
+                    )
+                except Exception:
+                    pass
+
         if is_selected:
             text_color = self._result_selected_text
             muted = self._result_selected_text
@@ -278,6 +304,13 @@ class ResultTabMixin(_ResultTabAppBase):
     def _on_result_row_click(self, idx: int) -> None:
         """Select a result row."""
         self.selected_result_index = idx
+
+        if getattr(self, "_ui_debug", False):
+            try:
+                self._debug_log(f"UI click result-row: idx={idx} results_len={len(self.results)}")
+            except Exception:
+                pass
+
         self._refresh_result_row_visuals()
 
     def _on_result_row_double_click(self, idx: int) -> None:
@@ -339,8 +372,21 @@ class ResultTabMixin(_ResultTabAppBase):
 
     def _refresh_result_row_visuals(self) -> None:
         """Re-render visuals for all result rows (selection highlight)."""
-        width = self.result_canvas.winfo_width() if hasattr(self, "result_canvas") else 0
-        if width <= 0:
+        width = 0
+        # Prefer row-canvas width (more reliable than the outer canvas during tab switches).
+        try:
+            if self._result_rows:
+                c0 = self._result_rows[0].get("canvas")
+                if isinstance(c0, tkinter.Canvas):
+                    width = int(c0.winfo_width())
+        except Exception:
+            width = 0
+        if width <= 50:
+            try:
+                width = int(self.result_canvas.winfo_width()) if hasattr(self, "result_canvas") else 0
+            except Exception:
+                width = 0
+        if width <= 50:
             width = 900
         for row in self._result_rows:
             self._render_result_row(row, width)

@@ -4,11 +4,12 @@ import sys
 import time
 import tkinter
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from app_helpers import human_size
-from tabs._typing_base import AppBase
+from ._typing_base import AppBase
 
 if TYPE_CHECKING:
     from tkinter.font import Font
@@ -78,10 +79,24 @@ class _ConvertTabAppBase(AppBase):
     def _refresh_convert_progress(self) -> None: ...
     def _start_progress_animation(self) -> None: ...
     def _sync_queue_order_for_processing(self) -> None: ...
+    def _open_logs(self) -> None: ...
     def _find_dropped_by_path(self, path: str) -> DroppedFile | None: ...
     def _is_source_supported(self, dropped: DroppedFile) -> bool: ...
     def _source_category(self, dropped: DroppedFile | None) -> str | None: ...
-    def _rounded_rect(self, c: tkinter.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kwargs) -> int: ...
+
+    if TYPE_CHECKING:
+        # Provided by another mixin at runtime (currently ResultTabMixin).
+        # Declared here only for static type checking.
+        def _rounded_rect(
+            self,
+            c: tkinter.Canvas,
+            x1: int,
+            y1: int,
+            x2: int,
+            y2: int,
+            r: int,
+            **kwargs,
+        ) -> int: ...
 
 
 class ConvertTabMixin(_ConvertTabAppBase):
@@ -105,8 +120,11 @@ class ConvertTabMixin(_ConvertTabAppBase):
         self.job_bar_label = ttk.Label(header, text="Queue")
         self.job_bar_label.grid(row=0, column=0, sticky="w")
 
+        self.job_bar_logs = ttk.Button(header, text="Logs", width=7, command=self._open_logs)
+        self.job_bar_logs.grid(row=0, column=1, sticky="e", padx=(0, 8))
+
         self.job_bar_toggle = ttk.Button(header, text="Hide", width=7, command=self._toggle_job_bar)
-        self.job_bar_toggle.grid(row=0, column=1, sticky="e")
+        self.job_bar_toggle.grid(row=0, column=2, sticky="e")
 
         self.job_bar_body = ttk.Frame(self.job_bar)
         self.job_bar_body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
@@ -142,6 +160,36 @@ class ConvertTabMixin(_ConvertTabAppBase):
         self.convert_list_frame.bind("<Configure>", self._on_convert_list_configure)
         self.convert_canvas.bind("<Configure>", self._on_convert_canvas_configure)
         self.convert_list_frame.bind("<Button-1>", self._on_convert_blank_click)
+
+        # Empty-state placeholder (shown when there are no dropped items).
+        self._convert_empty_frame = tkinter.Frame(list_host, bg=self._normal_bg)
+        self._convert_empty_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self._convert_empty_frame.columnconfigure(0, weight=1)
+        self._convert_empty_frame.rowconfigure(0, weight=1)
+        self._convert_empty_frame.rowconfigure(3, weight=1)
+
+        title = tkinter.Label(
+            self._convert_empty_frame,
+            text="No files yet",
+            bg=self._normal_bg,
+            fg=self._convert_text,
+        )
+        title.grid(row=1, column=0, pady=(0, 4))
+
+        try:
+            sub_font = tkfont.Font(root=self.root, font=self.font_normal)
+            sub_font.configure(size=max(9, int(sub_font.cget("size")) - 2))
+        except Exception:
+            sub_font = self.font_normal
+
+        sub = tkinter.Label(
+            self._convert_empty_frame,
+            text="Drop files here",
+            bg=self._normal_bg,
+            fg=self._convert_muted,
+            font=sub_font,
+        )
+        sub.grid(row=2, column=0)
 
         # Mouse wheel scrolling (trackpad included). Bind only while cursor is over the list.
         self.convert_canvas.bind("<Enter>", self._bind_convert_mousewheel)
@@ -180,6 +228,31 @@ class ConvertTabMixin(_ConvertTabAppBase):
 
         self._set_action_enabled(False)
         self._update_job_bar()
+        self._update_convert_empty_state()
+
+    def _update_convert_empty_state(self) -> None:
+        """Toggle Convert empty-state placeholder vs Finder-style list."""
+        has_items = bool(getattr(self, "dropped", []))
+        if has_items:
+            try:
+                self._convert_empty_frame.grid_remove()
+            except Exception:
+                pass
+            try:
+                self.convert_canvas.grid()
+                self.convert_scroll.grid()
+            except Exception:
+                pass
+        else:
+            try:
+                self.convert_canvas.grid_remove()
+                self.convert_scroll.grid_remove()
+            except Exception:
+                pass
+            try:
+                self._convert_empty_frame.grid()
+            except Exception:
+                pass
 
     def _set_action_enabled(self, enabled: bool) -> None:
         """Enable/disable the Convert controls based on selection validity."""
@@ -236,6 +309,8 @@ class ConvertTabMixin(_ConvertTabAppBase):
 
     def _layout_convert_rows(self, width: int) -> None:
         """Re-render each row for the given list width."""
+        if width <= 50:
+            width = 900
         for row in self._convert_rows.values():
             c = row.get("canvas")
             if not isinstance(c, tkinter.Canvas):
@@ -410,6 +485,15 @@ class ConvertTabMixin(_ConvertTabAppBase):
             for it in sel_ids:
                 _safe_lower(it)
 
+            if getattr(self, "_ui_debug", False):
+                try:
+                    self._debug_log(
+                        f"UI convert select: path={path} c_w={c.winfo_width()} arg_w={width} "
+                        f"x1={x1} x2={x2} y1={y1} y2={y2} ids={sel_ids}"
+                    )
+                except Exception:
+                    pass
+
         # Progress bar (green), same geometry as the rounded selection.
         prog_v = row.get("prog")
         if prog_v is not None:
@@ -452,6 +536,14 @@ class ConvertTabMixin(_ConvertTabAppBase):
                     above = sel_now
                 for it in prog_ids:
                     _safe_raise(it, above)
+
+                if getattr(self, "_ui_debug", False):
+                    try:
+                        self._debug_log(
+                            f"UI convert progress: path={path} p={p:.3f} fill_w={fill_w} track_w={track_w} ids={prog_ids}"
+                        )
+                    except Exception:
+                        pass
 
         # Text colors
         is_supported = self._is_source_supported(dropped)
@@ -649,8 +741,17 @@ class ConvertTabMixin(_ConvertTabAppBase):
         # Canvas-based Convert rows (Finder-like styling)
         c = widgets.get("canvas")
         if isinstance(c, tkinter.Canvas):
-            width = self.convert_canvas.winfo_width() if hasattr(self, "convert_canvas") else 0
-            if width <= 0:
+            width = 0
+            try:
+                width = int(c.winfo_width())
+            except Exception:
+                width = 0
+            if width <= 50:
+                try:
+                    width = int(self.convert_canvas.winfo_width()) if hasattr(self, "convert_canvas") else 0
+                except Exception:
+                    width = 0
+            if width <= 50:
                 width = 900
             self._render_convert_row(widgets, width)
             return
