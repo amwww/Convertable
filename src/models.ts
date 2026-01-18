@@ -11,6 +11,8 @@ export interface ConversionJob {
 	sourceName: string;
 	targetExt: string;
 	status: string;
+	progress?: number;
+	error?: string;
 }
 
 export interface ConversionResultItem {
@@ -22,6 +24,6 @@ export interface ConversionResultItem {
 
 export type EngineEvent =
 | { type: 'start'; srcPath: string; targetExt: string }
-| { type: 'progress'; srcPath: string; progress: number }
+	| { type: 'progress'; srcPath: string; targetExt: string; progress: number }
 | { type: 'done'; srcPath: string; outputPath: string; targetExt: string }
-| { type: 'error'; srcPath: string; message: string };
+	| { type: 'error'; srcPath: string; targetExt: string; message: string };

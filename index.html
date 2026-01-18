@@ -40,6 +40,23 @@
             justify-content: space-between;
             align-items: center;
             gap: 8px;
+
+            /* When macOS titleBarStyle is hiddenInset, the web contents extend
+               into the titlebar area. Make the header the drag region and leave
+               room for the traffic-light buttons. */
+            -webkit-app-region: drag;
+            padding-top: 10px;
+            padding-left: 76px;
+        }
+
+        header button,
+        header select,
+        header input,
+        header textarea,
+        header a,
+        nav.tabs,
+        nav.tabs button {
+            -webkit-app-region: no-drag;
         }
 
         header h1 {
@@ -161,6 +178,101 @@
             background: rgba(15, 23, 42, 0.9);
         }
 
+        .result-row[draggable="true"] {
+            cursor: grab;
+        }
+
+        .result-row[draggable="true"]:active {
+            cursor: grabbing;
+        }
+
+        .convert-progress {
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.85);
+            padding: 10px 10px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .convert-progress__top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .convert-progress__label {
+            color: var(--text-main);
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .convert-progress__pct {
+            color: var(--text-muted);
+            min-width: 56px;
+            text-align: right;
+        }
+
+        .convert-progress__bar {
+            position: relative;
+            height: 10px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(2, 6, 23, 0.7);
+            border: 1px solid rgba(31, 41, 55, 0.9);
+        }
+
+        .convert-progress__fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 0%;
+            background: linear-gradient(90deg, rgba(56, 189, 248, 0.8), rgba(34, 197, 94, 0.55));
+        }
+
+        .queue-row {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .queue-progress {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.9;
+            z-index: 0;
+        }
+
+        .queue-progress__fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(56, 189, 248, 0.12));
+        }
+
+        .queue-row.is-running {
+            outline: 1px solid rgba(56, 189, 248, 0.35);
+        }
+
+        .queue-row > :not(.queue-progress) {
+            position: relative;
+            z-index: 1;
+        }
+
+        .file-row.selected {
+            outline: 1px solid rgba(56, 189, 248, 0.7);
+            background: rgba(56, 189, 248, 0.12);
+        }
+
+        .file-list.drag-over {
+            outline: 1px dashed var(--accent);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+        }
+
         .file-name, .queue-name, .result-name {
             flex: 1;
             white-space: nowrap;
@@ -168,10 +280,15 @@
             text-overflow: ellipsis;
         }
 
-        .file-size, .file-ext, .queue-status, .result-ext {
+        .file-size, .file-ext, .file-mime, .queue-status, .result-ext {
             color: var(--text-muted);
             min-width: 60px;
             text-align: right;
+        }
+
+        .file-mime {
+            min-width: 160px;
+            font-size: 11px;
         }
 
         .convert-footer {
@@ -218,6 +335,24 @@
             box-shadow: 0 4px 14px rgba(15, 23, 42, 0.9);
         }
 
+        button.secondary {
+            border-radius: 999px;
+            border: 1px solid rgba(31, 41, 55, 0.9);
+            padding: 6px 14px;
+            background: rgba(15, 23, 42, 0.85);
+            color: var(--text-main);
+            cursor: pointer;
+        }
+
+        button.secondary:hover {
+            border-color: rgba(56, 189, 248, 0.6);
+        }
+
+        button.small {
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+
         .hint {
             font-size: 11px;
             color: var(--text-muted);
@@ -247,9 +382,21 @@
 
                 <div class="file-list" id="file-list" aria-label="Dropped files"></div>
 
+                <div class="convert-progress" id="convert-progress" hidden>
+                    <div class="convert-progress__top">
+                        <div class="convert-progress__label" id="convert-progress-label">Converting…</div>
+                        <div class="convert-progress__pct" id="convert-progress-pct">0%</div>
+                    </div>
+                    <div class="convert-progress__bar" aria-label="Conversion progress">
+                        <div class="convert-progress__fill" id="convert-progress-fill"></div>
+                    </div>
+                </div>
+
                 <div class="convert-footer">
                     <div class="hint">Select a target extension, then Convert.</div>
                     <div style="display:flex; gap: 10px; align-items:center;">
+                        <button class="secondary" id="pick-files-button" type="button">Choose Files…</button>
+                        <button class="secondary small" id="dnd-debug-button" type="button" title="Show drag-and-drop debug overlay">DnD Debug</button>
                         <select id="target-ext-select" aria-label="Target extension">
                             <option value=".PNG">.PNG</option>
                             <option value=".JPEG">.JPEG</option>

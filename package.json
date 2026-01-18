@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "npm run build && electron .",
+    "dev": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch\"",
     "build": "tsc",
+    "watch": "tsc -w --preserveWatchOutput",
+    "electron:watch": "wait-on dist/main.js dist/preload.js dist/index.js && nodemon --watch dist --watch index.html --ext js,html --exec \"electron .\"",
     "start": "npm run build && electron ."
   },
   "repository": {
@@ -21,10 +23,19 @@
     "url": "https://github.com/amwww/Convertable/issues"
   },
   "homepage": "https://github.com/amwww/Convertable#readme",
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "mime-types": "^3.0.1",
+    "sharp": "^0.34.3"
+  },
   "devDependencies": {
     "@types/node": "^25.0.9",
+    "@types/mime-types": "^2.1.4",
+    "concurrently": "^9.2.1",
     "electron": "^34.0.0",
+    "nodemon": "^3.1.11",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wait-on": "^9.0.3"
   }
 }
