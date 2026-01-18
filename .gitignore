@@ -3,6 +3,3 @@
 /build
 .DS_Store
 /node_modules
-
-# Needed for configuration
-!.package-lock.json
