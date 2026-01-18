@@ -1,4 +1,8 @@
+# Ignore build artifacts and system files
 /dist
 /build
 .DS_Store
 /node_modules
+
+# Needed for configuration
+!.package-lock.json
