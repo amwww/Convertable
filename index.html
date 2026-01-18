@@ -225,6 +225,56 @@
     </style>
 </head>
 <body>
-    
+    <div id="app">
+        <header>
+            <div>
+                <h1>Convertable</h1>
+                <span>Drop files, pick a target, convert.</span>
+            </div>
+            <nav class="tabs" aria-label="Tabs">
+                <button class="active" type="button" data-tab="convert">Convert</button>
+                <button type="button" data-tab="queue">Queue</button>
+                <button type="button" data-tab="result">Result</button>
+            </nav>
+        </header>
+
+        <main>
+            <section class="tab-panel active" id="tab-convert">
+                <div id="drop-zone">
+                    <h2>Drop files here</h2>
+                    <p class="hint">Or drag from Finder into this window.</p>
+                </div>
+
+                <div class="file-list" id="file-list" aria-label="Dropped files"></div>
+
+                <div class="convert-footer">
+                    <div class="hint">Select a target extension, then Convert.</div>
+                    <div style="display:flex; gap: 10px; align-items:center;">
+                        <select id="target-ext-select" aria-label="Target extension">
+                            <option value=".PNG">.PNG</option>
+                            <option value=".JPEG">.JPEG</option>
+                            <option value=".WEBP">.WEBP</option>
+                            <option value=".MP3">.MP3</option>
+                            <option value=".WAV">.WAV</option>
+                            <option value=".M4A">.M4A</option>
+                            <option value=".MP4">.MP4</option>
+                            <option value=".MOV">.MOV</option>
+                        </select>
+                        <button class="primary" id="convert-button" type="button">Convert</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-panel" id="tab-queue">
+                <div class="queue-list" id="queue-list" aria-label="Queue"></div>
+            </section>
+
+            <section class="tab-panel" id="tab-result">
+                <div class="result-list" id="result-list" aria-label="Results"></div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="./dist/index.js"></script>
 </body>
 </html>
