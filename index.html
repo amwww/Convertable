@@ -207,16 +207,16 @@
 
         .convert-progress__label {
             color: var(--text-main);
+            font-weight: 500;
+        }
+
+        .convert-progress__status {
+            color: var(--text-muted);
             flex: 1;
+            text-align: right;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-        }
-
-        .convert-progress__pct {
-            color: var(--text-muted);
-            min-width: 56px;
-            text-align: right;
         }
 
         .convert-progress__bar {
@@ -357,6 +357,13 @@
             font-size: 11px;
             color: var(--text-muted);
         }
+
+        .convert-disabled-reason {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-align: right;
+            max-width: 420px;
+        }
     </style>
 </head>
 <body>
@@ -378,14 +385,18 @@
                 <div id="drop-zone">
                     <h2>Drop files here</h2>
                     <p class="hint">Or drag from Finder into this window.</p>
+
+                    <div style="margin-top: 10px; display:flex; gap: 10px; align-items:center;">
+                        <button class="secondary" id="pick-files-button" type="button">Choose Files…</button>
+                    </div>
                 </div>
 
                 <div class="file-list" id="file-list" aria-label="Dropped files"></div>
 
                 <div class="convert-progress" id="convert-progress" hidden>
                     <div class="convert-progress__top">
-                        <div class="convert-progress__label" id="convert-progress-label">Converting…</div>
-                        <div class="convert-progress__pct" id="convert-progress-pct">0%</div>
+                        <div class="convert-progress__label" id="convert-progress-label">Queue</div>
+                        <div class="convert-progress__status" id="convert-progress-status">No jobs running</div>
                     </div>
                     <div class="convert-progress__bar" aria-label="Conversion progress">
                         <div class="convert-progress__fill" id="convert-progress-fill"></div>
@@ -394,20 +405,21 @@
 
                 <div class="convert-footer">
                     <div class="hint">Select a target extension, then Convert.</div>
-                    <div style="display:flex; gap: 10px; align-items:center;">
-                        <button class="secondary" id="pick-files-button" type="button">Choose Files…</button>
-                        <button class="secondary small" id="dnd-debug-button" type="button" title="Show drag-and-drop debug overlay">DnD Debug</button>
-                        <select id="target-ext-select" aria-label="Target extension">
-                            <option value=".PNG">.PNG</option>
-                            <option value=".JPEG">.JPEG</option>
-                            <option value=".WEBP">.WEBP</option>
-                            <option value=".MP3">.MP3</option>
-                            <option value=".WAV">.WAV</option>
-                            <option value=".M4A">.M4A</option>
-                            <option value=".MP4">.MP4</option>
-                            <option value=".MOV">.MOV</option>
-                        </select>
-                        <button class="primary" id="convert-button" type="button">Convert</button>
+                    <div style="display:flex; flex-direction:column; gap: 6px; align-items:flex-end;">
+                        <div style="display:flex; gap: 10px; align-items:center;">
+                            <select id="target-ext-select" aria-label="Target extension">
+                                <option value=".PNG">.PNG</option>
+                                <option value=".JPEG">.JPEG</option>
+                                <option value=".WEBP">.WEBP</option>
+                                <option value=".MP3">.MP3</option>
+                                <option value=".WAV">.WAV</option>
+                                <option value=".M4A">.M4A</option>
+                                <option value=".MP4">.MP4</option>
+                                <option value=".MOV">.MOV</option>
+                            </select>
+                            <button class="primary" id="convert-button" type="button">Convert</button>
+                        </div>
+                        <div class="convert-disabled-reason" id="convert-disabled-reason" hidden></div>
                     </div>
                 </div>
             </section>

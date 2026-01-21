@@ -9,7 +9,7 @@
     "dev": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch\"",
     "build": "tsc",
     "watch": "tsc -w --preserveWatchOutput",
-    "electron:watch": "wait-on dist/main.js dist/preload.js dist/index.js && nodemon --watch dist --watch index.html --ext js,html --exec \"electron .\"",
+    "electron:watch": "wait-on dist/main.js dist/preload.js dist/index.js && nodemon --delay 1500ms --signal SIGTERM --watch dist --watch index.html --ext js,html --exec \"electron .\"",
     "start": "npm run build && electron ."
   },
   "repository": {
@@ -25,7 +25,9 @@
   "homepage": "https://github.com/amwww/Convertable#readme",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "jszip": "^3.10.1",
     "mime-types": "^3.0.1",
+    "pdf-lib": "^1.17.1",
     "sharp": "^0.34.3"
   },
   "devDependencies": {

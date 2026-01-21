@@ -64,14 +64,12 @@ function setupConvertTab() {
 	const fileList = document.getElementById('file-list');
 	const convertProgress = document.getElementById('convert-progress');
 	const convertProgressLabel = document.getElementById('convert-progress-label');
-	const convertProgressPct = document.getElementById('convert-progress-pct');
+	const convertProgressStatus = document.getElementById('convert-progress-status');
 	const convertProgressFill = document.getElementById('convert-progress-fill');
 	const pickButton = document.getElementById(
 		'pick-files-button',
 	) as HTMLButtonElement | null;
-	const dndDebugButton = document.getElementById(
-		'dnd-debug-button',
-	) as HTMLButtonElement | null;
+	const convertDisabledReason = document.getElementById('convert-disabled-reason');
 	const targetSelect = document.getElementById(
 		'target-ext-select',
 	) as HTMLSelectElement | null;
@@ -94,60 +92,103 @@ function setupConvertTab() {
 	let currentJobProgress = 0;
 	let hideProgressTimer: number | null = null;
 
-	const dndDebug = (() => {
-		try {
-			return localStorage.getItem('convertable.dndDebug') === '1';
-		} catch {
-			return false;
-		}
-	})();
+	type SourceKind = 'image' | 'audio' | 'video' | 'other';
 
-	function setDndDebugEnabled(enabled: boolean) {
-		try {
-			localStorage.setItem('convertable.dndDebug', enabled ? '1' : '0');
-		} catch {
-			// ignore
-		}
+	function kindFromFile(f: DroppedFile): SourceKind {
+		// Prefer extension-based detection (more reliable across platforms), then mime.
+		const ext = (f.ext || '').toUpperCase();
+		if (ext === '.PDF') return 'image';
+		const m = (f.mime || '').toLowerCase();
+		if (m === 'application/pdf' || m === 'application/x-pdf' || m.endsWith('/pdf')) return 'image';
+		if (m.startsWith('image/')) return 'image';
+		if (m.startsWith('audio/')) return 'audio';
+		if (m.startsWith('video/')) return 'video';
+		return 'other';
 	}
 
-	function ensureDndDebugOverlay(): (text: string) => void {
-		let el = document.getElementById('dnd-debug-overlay');
-		if (!el) {
-			el = document.createElement('pre');
-			el.id = 'dnd-debug-overlay';
-			el.style.position = 'fixed';
-			el.style.left = '10px';
-			el.style.bottom = '10px';
-			el.style.zIndex = '99999';
-			el.style.maxWidth = '70vw';
-			el.style.maxHeight = '35vh';
-			el.style.overflow = 'auto';
-			el.style.padding = '10px 12px';
-			el.style.borderRadius = '10px';
-			el.style.border = '1px solid rgba(56, 189, 248, 0.5)';
-			el.style.background = 'rgba(2, 6, 23, 0.85)';
-			el.style.color = '#e5e7eb';
-			el.style.font = '12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-			document.body.appendChild(el);
+	function allowedTargetsForKind(kind: SourceKind): string[] {
+		if (kind === 'image') return ['.PNG', '.JPEG', '.WEBP', '.PDF'];
+		if (kind === 'audio') return ['.MP3', '.WAV', '.M4A'];
+		if (kind === 'video') return ['.MP4', '.MOV', '.MP3', '.WAV', '.M4A'];
+		return [];
+	}
+
+	function activePaths(): string[] {
+		return selected.size > 0 ? Array.from(selected) : dropped.map((f) => f.path);
+	}
+
+	function selectionKind(): SourceKind | null {
+		const paths = activePaths();
+		if (paths.length === 0) return null;
+		const kinds = new Set<SourceKind>();
+		for (const p of paths) {
+			const f = dropped.find((x) => x.path === p);
+			if (!f) continue;
+			kinds.add(kindFromFile(f));
 		}
-		return (text: string) => {
-			if (!el) return;
-			el.textContent = text;
-		};
+		if (kinds.size !== 1) return 'other';
+		return kinds.values().next().value ?? 'other';
 	}
 
-	const updateDndOverlay = dndDebug ? ensureDndDebugOverlay() : null;
-	if (dndDebugButton) {
-		dndDebugButton.textContent = dndDebug ? 'DnD Debug: On' : 'DnD Debug';
-		dndDebugButton.addEventListener('click', () => {
-			setDndDebugEnabled(!dndDebug);
-			location.reload();
-		});
+	function selectionAllPdf(): boolean {
+		const paths = activePaths();
+		if (paths.length === 0) return false;
+		for (const p of paths) {
+			const f = dropped.find((x) => x.path === p);
+			if (!f) return false;
+			if ((f.ext || '').toUpperCase() !== '.PDF') return false;
+		}
+		return true;
 	}
 
-	function updateDropVisibility() {
-		if (!dropZone) return;
-		dropZone.style.display = dropped.length === 0 ? '' : 'none';
+	function updateConvertLayout() {
+		const hasFiles = dropped.length > 0;
+		if (dropZone) dropZone.style.display = hasFiles ? 'none' : '';
+		if (fileList) fileList.style.display = hasFiles ? '' : 'none';
+		const footer = document.querySelector<HTMLElement>('#tab-convert .convert-footer');
+		if (footer) footer.style.display = hasFiles ? '' : 'none';
+		if (convertProgress) convertProgress.hidden = !hasFiles;
+	}
+
+	function updateTargetOptionsAndConvertState() {
+		if (!targetSelect || !convertButton) return;
+
+		const kind = selectionKind();
+		let allowed = kind ? allowedTargetsForKind(kind) : [];
+		// Don't offer PDF->PDF.
+		if (selectionAllPdf()) {
+			allowed = allowed.filter((x) => x !== '.PDF');
+		}
+		const prev = targetSelect.value;
+		targetSelect.innerHTML = '';
+		for (const ext of allowed) {
+			const opt = document.createElement('option');
+			opt.value = ext;
+			opt.textContent = ext;
+			targetSelect.appendChild(opt);
+		}
+		if (allowed.includes(prev)) targetSelect.value = prev;
+		else if (allowed.length > 0) targetSelect.value = allowed[0] ?? '';
+
+		const hasSelection = activePaths().length > 0;
+		const supported = allowed.length > 0;
+		const mixedOrUnsupported = kind === 'other';
+		convertButton.disabled = !hasSelection || !supported || mixedOrUnsupported;
+		targetSelect.disabled = !hasSelection || !supported;
+
+		let reason = '';
+		if (!hasSelection) {
+			reason = 'Add files to convert.';
+		} else if (mixedOrUnsupported) {
+			reason = 'Mixed or unsupported file types selected. Select only images, only audio, or only video.';
+		} else if (!supported) {
+			reason = 'No supported conversions for this selection.';
+		}
+		convertButton.title = reason;
+		if (convertDisabledReason) {
+			convertDisabledReason.textContent = reason;
+			convertDisabledReason.hidden = !reason;
+		}
 	}
 
 	function clearHideProgressTimer() {
@@ -157,39 +198,31 @@ function setupConvertTab() {
 		}
 	}
 
-	function setConvertProgressVisible(visible: boolean) {
-		if (!convertProgress) return;
-		convertProgress.hidden = !visible;
-	}
-
 	function updateConvertProgress() {
-		if (!convertProgress || !convertProgressLabel || !convertProgressPct || !convertProgressFill) return;
-		if (runTotal <= 0) {
-			setConvertProgressVisible(false);
+		if (!convertProgress || !convertProgressLabel || !convertProgressStatus || !convertProgressFill) return;
+		convertProgressLabel.textContent = 'Queue';
+
+		const bar = convertProgress.querySelector<HTMLElement>('.convert-progress__bar');
+		const running = runTotal > 0 && runDone < runTotal;
+		if (!running) {
+			convertProgressStatus.textContent = 'No jobs running';
+			convertProgressFill.style.width = '0%';
+			if (bar) bar.style.display = 'none';
 			return;
 		}
+		if (bar) bar.style.display = '';
 
 		const overall = Math.max(
 			0,
 			Math.min(1, (runDone + (currentJobKey ? currentJobProgress : 0)) / runTotal),
 		);
 		const pct = Math.round(overall * 100);
-
-		const labelParts: string[] = [];
-		labelParts.push(runDone >= runTotal ? 'Complete' : 'Converting');
-		labelParts.push(`${Math.min(runDone + 1, runTotal)}/${runTotal}`);
-		if (currentJobName && runDone < runTotal) labelParts.push(currentJobName);
-		convertProgressLabel.textContent = labelParts.join(' — ');
-		convertProgressPct.textContent = `${pct}%`;
+		const parts: string[] = [];
+		parts.push(`${pct}%`);
+		parts.push(`${runDone + 1}/${runTotal}`);
+		if (currentJobName) parts.push(currentJobName);
+		convertProgressStatus.textContent = parts.join(' — ');
 		convertProgressFill.style.width = `${pct}%`;
-		setConvertProgressVisible(true);
-
-		clearHideProgressTimer();
-		if (runDone >= runTotal) {
-			hideProgressTimer = window.setTimeout(() => {
-				setConvertProgressVisible(false);
-			}, 1500);
-		}
 	}
 
 	async function extractPathsFromDataTransfer(dt: DataTransfer | null): Promise<string[]> {
@@ -265,42 +298,6 @@ function setupConvertTab() {
 		e.stopPropagation();
 		const dt = e.dataTransfer;
 		const paths = await extractPathsFromDataTransfer(dt);
-		if (updateDndOverlay) {
-			const types = dt ? Array.from(dt.types ?? []) : [];
-			const itemKinds = dt ? Array.from(dt.items ?? []).map((it) => `${it.kind}:${it.type}`) : [];
-			const fileSummaries = dt
-				? Array.from(dt.files ?? []).map((f) => {
-					const anyFile = f as any;
-					const p = typeof anyFile.path === 'string' ? anyFile.path : '';
-					return `${f.name} | path=${p ? 'yes' : 'no'} | size=${(f as any).size ?? '—'} | type=${(f as any).type ?? '—'}`;
-				})
-				: [];
-			const webUtilsResolved =
-				window.convertable && dt
-					? (() => {
-						try {
-							return window.convertable.getPathsForFiles(Array.from(dt.files ?? []));
-						} catch {
-							return [];
-						}
-					})()
-					: [];
-			updateDndOverlay(
-				[
-					`DnD debug (toggle: Cmd/Ctrl+Alt+D; disable: localStorage convertable.dndDebug=0)`,
-					`event=${e.type} defaultPrevented=${e.defaultPrevented}`,
-					`types=${types.join(', ') || '—'}`,
-					`files=${dt?.files?.length ?? 0} items=${dt?.items?.length ?? 0}`,
-					`itemKinds=${itemKinds.join(' | ') || '—'}`,
-					`extractedPaths=${paths.length}`,
-					...paths.map((p) => `  - ${p}`),
-					`webUtilsPaths=${webUtilsResolved.length}`,
-					...webUtilsResolved.map((p) => `  - ${p}`),
-					`fileDetails:`,
-					...(fileSummaries.length ? fileSummaries.map((s) => `  - ${s}`) : ['  - —']),
-				].join('\n'),
-			);
-		}
 		if (paths.length === 0) return;
 		void addFilesByPath(paths);
 	}
@@ -321,7 +318,8 @@ function setupConvertTab() {
 				lastSelectedIndex = 0;
 			}
 		}
-		updateDropVisibility();
+		updateConvertLayout();
+		updateTargetOptionsAndConvertState();
 		renderFiles();
 	}
 	
@@ -368,6 +366,7 @@ function setupConvertTab() {
 					lastSelectedIndex = idx;
 				}
 				renderFiles();
+				updateTargetOptionsAndConvertState();
 			});
 
 			row.append(name, size, mime, ext);
@@ -432,14 +431,11 @@ function setupConvertTab() {
 
 			row.addEventListener('dragstart', (ev) => {
 				// Use Electron main-process drag-out so the item can be dropped into Finder/Desktop.
+				// Prevent the default HTML5 drag payload (which can create a dropped text file).
+				ev.preventDefault();
+				ev.stopPropagation();
 				try {
 					window.convertable?.startDrag(item.outputPath);
-				} catch {
-					// ignore
-				}
-				// Some browsers require dataTransfer to be touched for dragstart to "stick".
-				try {
-					ev.dataTransfer?.setData('text/plain', item.outputPath);
 				} catch {
 					// ignore
 				}
@@ -581,6 +577,7 @@ function setupConvertTab() {
 			// Backend not wired yet.
 			return;
 		}
+		if (convertButton.disabled) return;
 		const targetExt = targetSelect.value.trim();
 		if (!targetExt) return;
 		const srcPaths = selected.size > 0 ? Array.from(selected) : dropped.map((f) => f.path);
@@ -614,7 +611,9 @@ function setupConvertTab() {
 		window.convertable.onEngineEvent(handleEngineEvent);
 	}
 
-	updateDropVisibility();
+	updateConvertLayout();
+	updateTargetOptionsAndConvertState();
+	updateConvertProgress();
 }
 
 window.addEventListener('DOMContentLoaded', () => {
