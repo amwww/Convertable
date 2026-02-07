@@ -51,6 +51,8 @@ This runs electron-builder’s mac pipeline. If you have signing configured, it 
 
 If you see “skipped macOS application code signing”, that’s expected unless you have a valid **Developer ID Application** certificate.
 
+If you have old/expired certificates in your keychain, electron-builder may log them while auto-discovering identities. This repo configures unsigned local builds by default (see the `build.mac.identity` setting in `package.json`).
+
 - Unsigned builds usually run on your machine.
 - To distribute to other Macs without scary Gatekeeper prompts, you typically need:
   - Developer ID Application signing

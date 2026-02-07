@@ -92,12 +92,13 @@ function setupConvertTab() {
 	let currentJobProgress = 0;
 	let hideProgressTimer: number | null = null;
 
-	type SourceKind = 'image' | 'audio' | 'video' | 'other';
+	type SourceKind = 'image' | 'audio' | 'video' | 'archive' | 'other';
 
 	function kindFromFile(f: DroppedFile): SourceKind {
 		// Prefer extension-based detection (more reliable across platforms), then mime.
 		const ext = (f.ext || '').toUpperCase();
 		if (ext === '.PDF') return 'image';
+		if (['.ZIP', '.RAR', '.7Z', '.TAR', '.TAR.GZ', '.TGZ'].includes(ext)) return 'archive';
 		const m = (f.mime || '').toLowerCase();
 		if (m === 'application/pdf' || m === 'application/x-pdf' || m.endsWith('/pdf')) return 'image';
 		if (m.startsWith('image/')) return 'image';
@@ -110,6 +111,7 @@ function setupConvertTab() {
 		if (kind === 'image') return ['.PNG', '.JPEG', '.WEBP', '.PDF'];
 		if (kind === 'audio') return ['.MP3', '.WAV', '.M4A'];
 		if (kind === 'video') return ['.MP4', '.MOV', '.MP3', '.WAV', '.M4A'];
+		if (kind === 'archive') return ['.EXTRACT', '.ZIP', '.TAR', '.TAR.GZ', '.TGZ', '.7Z'];
 		return [];
 	}
 
@@ -304,6 +306,7 @@ function setupConvertTab() {
 
 	async function addFilesByPath(paths: string[]) {
 		if (!window.convertable) return;
+		const hadNoSelection = selected.size === 0;
 		const unique = Array.from(new Set(paths.filter((p) => typeof p === 'string' && p)));
 		if (unique.length === 0) return;
 		const metas = await window.convertable.getFileMetadata(unique);
@@ -311,12 +314,15 @@ function setupConvertTab() {
 			if (dropped.some((x) => x.path === m.path)) continue;
 			dropped.push(m);
 		}
-		if (dropped.length > 0 && selected.size === 0) {
-			const first = dropped[0];
-			if (first) {
-				selected.add(first.path);
-				lastSelectedIndex = 0;
+		// UX: when users add multiple files (drop/pick), they typically expect Convert
+		// to run on all of them without needing multi-select.
+		if (dropped.length > 0 && hadNoSelection) {
+			selected.clear();
+			for (let i = 0; i < dropped.length; i++) {
+				const item = dropped[i];
+				if (item) selected.add(item.path);
 			}
+			lastSelectedIndex = dropped.length - 1;
 		}
 		updateConvertLayout();
 		updateTargetOptionsAndConvertState();

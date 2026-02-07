@@ -1,7 +1,7 @@
 {
   "name": "convertable",
   "version": "1.0.0",
-  "description": "",
+  "description": "A small file conversion app.",
   "main": "dist/main.js",
   "type": "module",
   "scripts": {
@@ -28,21 +28,26 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@img/sharp-libvips-darwin-arm64": "^1.2.4",
+    "7zip-bin": "^5.2.0",
+    "adm-zip": "^0.5.16",
     "jszip": "^3.10.1",
     "mime-types": "^3.0.1",
+    "node-unrar-js": "^2.0.2",
     "pdf-lib": "^1.17.1",
-    "sharp": "^0.34.3"
+    "sharp": "^0.34.3",
+    "tar": "^7.5.7"
   },
   "devDependencies": {
-    "@types/node": "^25.0.9",
+    "@types/adm-zip": "^0.5.7",
     "@types/mime-types": "^2.1.4",
+    "@types/node": "^25.0.9",
     "concurrently": "^9.2.1",
     "electron": "^34.0.0",
+    "electron-builder": "^24.13.3",
     "nodemon": "^3.1.11",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "wait-on": "^9.0.3",
-    "electron-builder": "^24.13.3"
+    "wait-on": "^9.0.3"
   },
   "build": {
     "appId": "com.amwww.convertable",
@@ -71,7 +76,8 @@
       "target": [
         "dir"
       ],
-      "icon": "tktinker/assets/icon.icns"
+      "icon": "tktinker/assets/icon.icns",
+      "identity": null
     }
   }
 }

@@ -9,8 +9,16 @@ import { lookup as mimeLookup } from 'mime-types';
 import sharp from 'sharp';
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
+import AdmZip from 'adm-zip';
+import * as tar from 'tar';
+import { createExtractorFromData } from 'node-unrar-js';
 
 import type { EngineEvent } from './models.js';
+
+type SevenZipBinModule = {
+	path7za?: unknown;
+	default?: { path7za?: unknown };
+};
 
 function setupProcessSignalHandlers() {
 	// When running under nodemon, restarts are done via SIGTERM.
@@ -46,9 +54,37 @@ type DroppedFile = {
 	ext: string;
 };
 
-function extUpper(filePath: string): string {
+const compoundExts = [
+	'.tar.gz',
+	'.tar.bz2',
+	'.tar.xz',
+	'.tar.zst',
+	'.tar.lz',
+	'.tar.lz4',
+	'.tgz',
+];
+
+function normalizedExt(filePath: string): string {
+	const baseLower = path.basename(filePath).toLowerCase();
+	for (const ext of compoundExts) {
+		if (baseLower.endsWith(ext)) return ext.toUpperCase();
+	}
 	const ext = path.extname(filePath);
 	return ext ? ext.toUpperCase() : '—';
+}
+
+function baseNameWithoutKnownExt(filePath: string): string {
+	const base = path.basename(filePath);
+	const baseLower = base.toLowerCase();
+	for (const ext of compoundExts) {
+		if (baseLower.endsWith(ext)) return base.slice(0, Math.max(0, base.length - ext.length));
+	}
+	const parsed = path.parse(base);
+	return parsed.name;
+}
+
+function extUpper(filePath: string): string {
+	return normalizedExt(filePath);
 }
 
 async function statSize(filePath: string): Promise<number | null> {
@@ -101,9 +137,9 @@ async function ensureDir(dirPath: string): Promise<void> {
 }
 
 function withNewExtension(srcPath: string, targetExt: string, outDir: string): string {
-	const parsed = path.parse(srcPath);
+	const baseName = baseNameWithoutKnownExt(srcPath);
 	const cleanExt = targetExt.startsWith('.') ? targetExt : `.${targetExt}`;
-	return path.join(outDir, `${parsed.name}${cleanExt.toLowerCase()}`);
+	return path.join(outDir, `${baseName}${cleanExt.toLowerCase()}`);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -116,16 +152,27 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 async function buildNonCollidingOutputPath(srcPath: string, targetExt: string, outDir: string): Promise<string> {
-	const parsed = path.parse(srcPath);
+	const baseName = baseNameWithoutKnownExt(srcPath);
 	const cleanExt = targetExt.startsWith('.') ? targetExt : `.${targetExt}`;
-	const base = path.join(outDir, `${parsed.name}${cleanExt.toLowerCase()}`);
+	const base = path.join(outDir, `${baseName}${cleanExt.toLowerCase()}`);
 	if (!(await fileExists(base))) return base;
 	for (let n = 1; n < 10_000; n += 1) {
-		const candidate = path.join(outDir, `${parsed.name} (${n})${cleanExt.toLowerCase()}`);
+		const candidate = path.join(outDir, `${baseName} (${n})${cleanExt.toLowerCase()}`);
 		if (!(await fileExists(candidate))) return candidate;
 	}
 	// Extremely unlikely; fall back to timestamp.
-	return path.join(outDir, `${parsed.name} (${Date.now()})${cleanExt.toLowerCase()}`);
+	return path.join(outDir, `${baseName} (${Date.now()})${cleanExt.toLowerCase()}`);
+}
+
+async function buildNonCollidingOutputDir(srcPath: string, suffix: string, outDir: string): Promise<string> {
+	const baseName = baseNameWithoutKnownExt(srcPath);
+	const base = path.join(outDir, `${baseName}${suffix}`);
+	if (!(await fileExists(base))) return base;
+	for (let n = 1; n < 10_000; n += 1) {
+		const candidate = path.join(outDir, `${baseName}${suffix} (${n})`);
+		if (!(await fileExists(candidate))) return candidate;
+	}
+	return path.join(outDir, `${baseName}${suffix} (${Date.now()})`);
 }
 
 function isImageTarget(ext: string): boolean {
@@ -134,6 +181,153 @@ function isImageTarget(ext: string): boolean {
 
 function isMediaTarget(ext: string): boolean {
 	return ['.MP3', '.WAV', '.M4A', '.MP4', '.MOV'].includes(ext.toUpperCase());
+}
+
+function isArchiveTarget(ext: string): boolean {
+	const t = ext.toUpperCase();
+	return ['.ZIP', '.TAR', '.TAR.GZ', '.TGZ', '.7Z'].includes(t);
+}
+
+function isExtractTarget(ext: string): boolean {
+	return ext.toUpperCase() === '.EXTRACT';
+}
+
+function isArchiveSourceExt(ext: string): boolean {
+	const t = ext.toUpperCase();
+	return ['.ZIP', '.TAR', '.TAR.GZ', '.TGZ', '.RAR', '.7Z'].includes(t);
+}
+
+function isSafeArchiveMemberPath(memberPath: string): boolean {
+	// Avoid Zip Slip / path traversal when extracting.
+	const p = memberPath.replace(/\\/g, '/');
+	if (!p || p.startsWith('/') || /^[A-Za-z]:\//.test(p)) return false;
+	const norm = path.posix.normalize(p);
+	if (norm === '.' || norm.startsWith('../') || norm.includes('/../')) return false;
+	return true;
+}
+
+async function listFilesRecursive(rootDir: string): Promise<string[]> {
+	const out: string[] = [];
+	async function walk(dir: string) {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		for (const ent of entries) {
+			const full = path.join(dir, ent.name);
+			if (ent.isDirectory()) {
+				await walk(full);
+			} else if (ent.isFile()) {
+				out.push(path.relative(rootDir, full));
+			}
+		}
+	}
+	await walk(rootDir);
+	return out;
+}
+
+async function extractArchive(srcPath: string, destDir: string): Promise<void> {
+	const srcExt = normalizedExt(srcPath).toUpperCase();
+	await ensureDir(destDir);
+	if (srcExt === '.ZIP') {
+		const zip = new AdmZip(srcPath);
+		for (const entry of zip.getEntries()) {
+			const name = entry.entryName;
+			if (!isSafeArchiveMemberPath(name)) continue;
+			const outPath = path.join(destDir, name);
+			if (entry.isDirectory) {
+				await ensureDir(outPath);
+				continue;
+			}
+			await ensureDir(path.dirname(outPath));
+			const data = entry.getData();
+			await fs.writeFile(outPath, data);
+		}
+		return;
+	}
+	if (srcExt === '.TAR' || srcExt === '.TAR.GZ' || srcExt === '.TGZ') {
+		const gzip = srcExt === '.TAR.GZ' || srcExt === '.TGZ';
+		await tar.x({
+			file: srcPath,
+			cwd: destDir,
+			gzip,
+			filter: (p) => isSafeArchiveMemberPath(p),
+		});
+		return;
+	}
+	if (srcExt === '.RAR') {
+		const size = await statSize(srcPath);
+		// node-unrar-js is in-memory; avoid OOM on very large RARs.
+		if (size != null && size > 512 * 1024 * 1024) {
+			throw new Error('RAR archive is too large to extract in this build (in-memory extractor).');
+		}
+		const bytes = await fs.readFile(srcPath);
+		const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+		const extractor = await createExtractorFromData({ data: ab });
+		const res = extractor.extract();
+		for (const f of res.files) {
+			if (f.fileHeader.flags.directory) continue;
+			const fileName = f.fileHeader.name;
+			const data = f.extraction;
+			if (!fileName || !data) continue;
+			if (!isSafeArchiveMemberPath(fileName)) continue;
+			const outPath = path.join(destDir, fileName);
+			await ensureDir(path.dirname(outPath));
+			await fs.writeFile(outPath, Buffer.from(data));
+		}
+		return;
+	}
+	if (srcExt === '.7Z') {
+		const cmd = await sevenZipCommand();
+		// Validate member paths before extracting.
+		const listed = await spawnCommandCapture(cmd, ['l', '-slt', srcPath]);
+		for (const line of listed.stdout.split(/\r?\n/g)) {
+			const m = /^Path\s*=\s*(.*)$/.exec(line);
+			if (!m) continue;
+			const member = (m[1] ?? '').trim();
+			if (!member) continue;
+			if (!isSafeArchiveMemberPath(member)) {
+				throw new Error('Archive contains unsafe paths and cannot be extracted.');
+			}
+		}
+		await spawnCommand(cmd, ['x', '-y', `-o${destDir}`, srcPath]);
+		return;
+	}
+	throw new Error(`Unsupported archive type: ${srcExt}`);
+}
+
+async function createArchiveFromDir(srcDir: string, destArchivePath: string, targetExt: string): Promise<void> {
+	const t = targetExt.toUpperCase();
+	if (t === '.ZIP') {
+		const zip = new AdmZip();
+		zip.addLocalFolder(srcDir);
+		zip.writeZip(destArchivePath);
+		return;
+	}
+	if (t === '.TAR' || t === '.TAR.GZ' || t === '.TGZ') {
+		const gzip = t === '.TAR.GZ' || t === '.TGZ';
+		const files = await listFilesRecursive(srcDir);
+		await tar.c({ cwd: srcDir, file: destArchivePath, gzip }, files);
+		return;
+	}
+	if (t === '.7Z') {
+		const cmd = await sevenZipCommand();
+		// Create 7z archive from directory contents.
+		await spawnCommand(cmd, ['a', '-t7z', '-y', '-mx=7', destArchivePath, '.'], { cwd: srcDir });
+		return;
+	}
+	throw new Error(`Unsupported archive target: ${targetExt}`);
+}
+
+async function convertArchive(srcPath: string, destArchivePath: string, targetExt: string): Promise<void> {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'convertable-archive-'));
+	try {
+		await extractArchive(srcPath, tmpDir);
+		await createArchiveFromDir(tmpDir, destArchivePath, targetExt);
+	} finally {
+		try {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		} catch {
+			// ignore
+		}
+	}
 }
 
 async function convertImage(srcPath: string, destPath: string, targetExt: string): Promise<void> {
@@ -162,9 +356,9 @@ async function convertImageToPdf(srcPath: string, destPath: string): Promise<voi
 	await fs.writeFile(destPath, pdfBytes);
 }
 
-async function spawnCommand(cmd: string, args: string[]): Promise<void> {
+async function spawnCommand(cmd: string, args: string[], opts?: { cwd?: string }): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+		const child = spawn(cmd, args, { cwd: opts?.cwd, stdio: ['ignore', 'ignore', 'pipe'] });
 		let stderr = '';
 		child.stderr.on('data', (buf) => {
 			stderr += buf.toString('utf-8');
@@ -174,6 +368,28 @@ async function spawnCommand(cmd: string, args: string[]): Promise<void> {
 		});
 		child.on('close', (code) => {
 			if (code === 0) resolve();
+			reject(new Error(stderr || `${cmd} exited with code ${code}`));
+		});
+	});
+}
+
+async function spawnCommandCapture(cmd: string, args: string[], opts?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(cmd, args, { cwd: opts?.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+		let stdout = '';
+		let stderr = '';
+		child.stdout.on('data', (buf) => {
+			stdout += buf.toString('utf-8');
+		});
+		child.stderr.on('data', (buf) => {
+			stderr += buf.toString('utf-8');
+		});
+		child.on('error', (err) => reject(err));
+		child.on('close', (code) => {
+			if (code === 0) {
+				resolve({ stdout, stderr });
+				return;
+			}
 			reject(new Error(stderr || `${cmd} exited with code ${code}`));
 		});
 	});
@@ -298,11 +514,74 @@ async function convertPdfToImages(
 
 async function spawnFfmpeg(args: string[]): Promise<void> {
 	const cmd = await ffmpegCommand();
+	return spawnFfmpegWithProgress(args);
+}
+
+function parseHmsTimestamp(value: string): number | null {
+	// Expected: HH:MM:SS[.ms]
+	const m = /^\s*(\d+):(\d+):(\d+(?:\.\d+)?)\s*$/.exec(value);
+	if (!m) return null;
+	const h = Number(m[1]);
+	const min = Number(m[2]);
+	const s = Number(m[3]);
+	if (!Number.isFinite(h) || !Number.isFinite(min) || !Number.isFinite(s)) return null;
+	return h * 3600 + min * 60 + s;
+}
+
+async function spawnFfmpegWithProgress(
+	args: string[],
+	onProgress?: (progress: number) => void,
+): Promise<void> {
+	const cmd = await ffmpegCommand();
 	return new Promise((resolve, reject) => {
 		const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-		let stderr = '';
+
+		// Keep only a tail of stderr for errors so we don't grow unbounded.
+		let stderrTail = '';
+		let bufRemainder = '';
+		let durationSec: number | null = null;
+		let lastProgress = 0;
+
+		function pushStderrTail(text: string) {
+			stderrTail += text;
+			const max = 32_768;
+			if (stderrTail.length > max) stderrTail = stderrTail.slice(stderrTail.length - max);
+		}
+
+		function handleLine(line: string) {
+			// Example: Duration: 00:03:12.34, start: 0.000000, bitrate: ...
+			if (durationSec == null) {
+				const dm = /Duration:\s*(\d+:\d+:\d+(?:\.\d+)?)/.exec(line);
+				if (dm) {
+					const d = parseHmsTimestamp(dm[1] ?? '');
+					if (d != null && d > 0) durationSec = d;
+				}
+			}
+			// Example: ... time=00:00:05.12 ...
+			if (durationSec != null && durationSec > 0 && onProgress) {
+				const tm = /time=(\d+:\d+:\d+(?:\.\d+)?)/.exec(line);
+				if (tm) {
+					const t = parseHmsTimestamp(tm[1] ?? '');
+					if (t != null && t >= 0) {
+						const p = Math.max(0, Math.min(0.999, t / durationSec));
+						// Avoid noisy updates and regressions.
+						if (p > lastProgress + 0.002) {
+							lastProgress = p;
+							onProgress(p);
+						}
+					}
+				}
+			}
+		}
+
 		child.stderr.on('data', (buf) => {
-			stderr += buf.toString('utf-8');
+			const text = buf.toString('utf-8');
+			pushStderrTail(text);
+			bufRemainder += text;
+			// ffmpeg frequently uses carriage returns for its status line.
+			const parts = bufRemainder.split(/\r\n|\n|\r/g);
+			bufRemainder = parts.pop() ?? '';
+			for (const p of parts) handleLine(p);
 		});
 		child.on('error', (err) => {
 			// Common case: ffmpeg isn't installed / not on PATH and we couldn't load the bundled binary.
@@ -317,8 +596,11 @@ async function spawnFfmpeg(args: string[]): Promise<void> {
 			reject(err);
 		});
 		child.on('close', (code) => {
-			if (code === 0) resolve();
-			reject(new Error(stderr || `ffmpeg exited with code ${code}`));
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			reject(new Error(stderrTail || `ffmpeg exited with code ${code}`));
 		});
 	});
 }
@@ -343,32 +625,54 @@ async function ffmpegCommand(): Promise<string> {
 	return cachedFfmpegCommand;
 }
 
-async function convertWithFfmpeg(srcPath: string, destPath: string, targetExt: string): Promise<void> {
+let cached7zCommand: string | null = null;
+async function sevenZipCommand(): Promise<string> {
+	if (cached7zCommand) return cached7zCommand;
+	try {
+		const mod = (await import('7zip-bin')) as unknown as SevenZipBinModule;
+		const p: unknown = mod.path7za ?? mod.default?.path7za;
+		if (typeof p === 'string' && p) {
+			cached7zCommand = p;
+			return cached7zCommand;
+		}
+	} catch {
+		// ignore
+	}
+	cached7zCommand = '7za';
+	return cached7zCommand;
+}
+
+async function convertWithFfmpeg(
+	srcPath: string,
+	destPath: string,
+	targetExt: string,
+	onProgress?: (progress: number) => void,
+): Promise<void> {
 	const t = targetExt.toUpperCase();
 	const args: string[] = ['-y', '-i', srcPath];
 	if (t === '.MP3') {
 		args.push('-vn', '-c:a', 'libmp3lame', '-q:a', '2', destPath);
-		await spawnFfmpeg(args);
+		await spawnFfmpegWithProgress(args, onProgress);
 		return;
 	}
 	if (t === '.WAV') {
 		args.push('-vn', '-c:a', 'pcm_s16le', destPath);
-		await spawnFfmpeg(args);
+		await spawnFfmpegWithProgress(args, onProgress);
 		return;
 	}
 	if (t === '.M4A') {
 		args.push('-vn', '-c:a', 'aac', '-b:a', '192k', destPath);
-		await spawnFfmpeg(args);
+		await spawnFfmpegWithProgress(args, onProgress);
 		return;
 	}
 	if (t === '.MP4') {
 		args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', destPath);
-		await spawnFfmpeg(args);
+		await spawnFfmpegWithProgress(args, onProgress);
 		return;
 	}
 	// .MOV (simple h264-in-mov)
 	args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', destPath);
-	await spawnFfmpeg(args);
+	await spawnFfmpegWithProgress(args, onProgress);
 }
 
 class ConversionEngine {
@@ -411,7 +715,7 @@ class ConversionEngine {
 		const startedAt = Date.now();
 		let lastEmitted = 0;
 		const tickMs = 120;
-		const timer = setInterval(() => {
+		let timer: NodeJS.Timeout | null = setInterval(() => {
 			const elapsed = Date.now() - startedAt;
 			// Ease-out curve that approaches 0.95 asymptotically.
 			const p = Math.min(0.95, 0.95 * (1 - Math.exp(-elapsed / 1200)));
@@ -421,6 +725,13 @@ class ConversionEngine {
 			}
 		}, tickMs);
 
+		const stopPseudo = () => {
+			if (timer) {
+				clearInterval(timer);
+				timer = null;
+			}
+		};
+
 		const outDir = defaultOutputDir();
 		const outDirResolved = await outDir;
 		await ensureDir(outDirResolved);
@@ -429,6 +740,7 @@ class ConversionEngine {
 
 		try {
 			const srcMime = detectMime(srcPath);
+			const srcExt = normalizedExt(srcPath).toUpperCase();
 			const t = targetExt.toUpperCase();
 
 			if (t === '.PDF') {
@@ -444,15 +756,34 @@ class ConversionEngine {
 			} else if (isImageTarget(t)) {
 				await convertImage(srcPath, outputPath, t);
 			} else if (isMediaTarget(t)) {
-				await convertWithFfmpeg(srcPath, outputPath, t);
+				await convertWithFfmpeg(srcPath, outputPath, t, (p) => {
+					// Switch to real ffmpeg progress once we have it.
+					stopPseudo();
+					if (p > lastEmitted + 0.002) {
+						lastEmitted = p;
+						this.emit({ type: 'progress', srcPath, targetExt, progress: p });
+					}
+				});
+			} else if (isExtractTarget(t)) {
+				if (!isArchiveSourceExt(srcExt)) {
+					throw new Error('Extract is only supported for archive inputs (.zip, .tar, .tar.gz/.tgz, .rar).');
+				}
+				outputPath = await buildNonCollidingOutputDir(srcPath, ' (extracted)', outDirResolved);
+				await extractArchive(srcPath, outputPath);
+			} else if (isArchiveTarget(t)) {
+				if (!isArchiveSourceExt(srcExt)) {
+					throw new Error('Archive conversion is only supported for archive inputs (.zip, .tar, .tar.gz/.tgz, .rar).');
+				}
+				outputPath = await buildNonCollidingOutputPath(srcPath, t, outDirResolved);
+				await convertArchive(srcPath, outputPath, t);
 			} else {
 				throw new Error(`Unsupported target: ${targetExt}`);
 			}
-			clearInterval(timer);
+			stopPseudo();
 			this.emit({ type: 'progress', srcPath, targetExt, progress: 1 });
 			this.emit({ type: 'done', srcPath, outputPath, targetExt });
 		} catch (err) {
-			clearInterval(timer);
+			stopPseudo();
 			const msg = err instanceof Error ? err.message : String(err);
 			this.emit({ type: 'error', srcPath, targetExt, message: msg });
 			throw err;
@@ -528,14 +859,42 @@ app.whenReady().then(() => {
 		try {
 			// If the file is an image, this gives a nice drag preview.
 			const candidate = nativeImage.createFromPath(p);
-			if (!candidate.isEmpty()) icon = candidate;
+			if (!candidate.isEmpty()) {
+				// macOS can render very large drag previews if the icon is huge.
+				// Keep it to a small, consistent size while preserving aspect ratio.
+				const { width, height } = candidate.getSize();
+				const maxDim = 128;
+				if (width > 0 && height > 0) {
+					icon = width >= height
+						? candidate.resize({ width: maxDim, quality: 'good' })
+						: candidate.resize({ height: maxDim, quality: 'good' });
+				} else {
+					icon = candidate.resize({ width: maxDim, quality: 'good' });
+				}
+			}
 		} catch {
 			// ignore
 		}
+		if (icon.isEmpty()) {
+			// Ensure we always provide a valid icon so drag-out works for non-images.
+			const transparentPng =
+				'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
+			try {
+				icon = nativeImage.createFromDataURL(transparentPng);
+			} catch {
+				// ignore
+			}
+		}
 		try {
-			event.sender.startDrag({ file: p, icon });
+				// Prefer the modern API; this also handles directories reliably.
+				event.sender.startDrag({ files: [p], icon } as any);
 		} catch {
-			// ignore
+				try {
+					// Back-compat for older Electron versions.
+					event.sender.startDrag({ file: p, icon } as any);
+				} catch {
+					// ignore
+				}
 		}
 	});
 
@@ -543,7 +902,27 @@ app.whenReady().then(() => {
 		const res = await dialog.showOpenDialog({
 			properties: ['openFile', 'multiSelections'],
 			filters: [
-				{ name: 'Supported', extensions: ['png', 'jpg', 'jpeg', 'webp', 'mp3', 'wav', 'm4a', 'mp4', 'mov', 'pdf'] },
+				{
+					name: 'Supported',
+					extensions: [
+						'png',
+						'jpg',
+						'jpeg',
+						'webp',
+						'mp3',
+						'wav',
+						'm4a',
+						'mp4',
+						'mov',
+						'pdf',
+						'zip',
+						'rar',
+						'7z',
+						'tar',
+						'gz',
+						'tgz',
+					],
+				},
 				{ name: 'All Files', extensions: ['*'] },
 			],
 		});
