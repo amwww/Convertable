@@ -6,12 +6,13 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch\"",
+    "dev": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch -- --no-watch\"",
+    "dev:watch": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch\"",
     "build": "tsc",
     "pack:mac": "npm run build && electron-builder --mac --dir",
     "dist:mac": "npm run build && electron-builder --mac",
     "watch": "tsc -w --preserveWatchOutput",
-    "electron:watch": "wait-on dist/main.js dist/preload.js dist/index.js && nodemon --delay 1500ms --signal SIGTERM --watch dist --watch index.html --ext js,html --exec \"electron .\"",
+    "electron:watch": "node scripts/electron-dev.mjs",
     "start": "npm run build && electron ."
   },
   "repository": {
@@ -30,6 +31,7 @@
     "@img/sharp-libvips-darwin-arm64": "^1.2.4",
     "7zip-bin": "^5.2.0",
     "adm-zip": "^0.5.16",
+    "electron-store": "^10.0.0",
     "jszip": "^3.10.1",
     "mime-types": "^3.0.1",
     "node-unrar-js": "^2.0.2",

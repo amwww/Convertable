@@ -5,18 +5,14 @@ This repo contains two apps:
 - **Electron app (current)**: TypeScript + Electron (this folder)
 - **Legacy Tk/PyInstaller app**: see `tktinker/` and `tktinker/BUILDING.md`
 
-## Prereqs
-
 - Node.js + npm
 - macOS (for building a `.app` bundle)
 
 ## Dev
 
-```bash
 npm install
 npm run dev
 ```
-
 - TypeScript compiles in watch mode.
 - Electron restarts automatically when `dist/` changes.
 

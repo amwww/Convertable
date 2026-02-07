@@ -44,9 +44,15 @@
             /* When macOS titleBarStyle is hiddenInset, the web contents extend
                into the titlebar area. Make the header the drag region and leave
                room for the traffic-light buttons. */
-            -webkit-app-region: drag;
             padding-top: 10px;
             padding-left: 76px;
+        }
+
+        /* Only the title area is draggable; keep controls clickable. */
+        header .titlebar {
+            -webkit-app-region: drag;
+            flex: 1;
+            min-width: 0;
         }
 
         header button,
@@ -89,6 +95,10 @@
             transition: background 120ms ease, color 120ms ease;
         }
 
+        nav.tabs button:hover {
+            background: rgba(56, 189, 248, 0.06);
+        }
+
         nav.tabs button.active {
             background: var(--accent-soft);
             color: var(--accent);
@@ -117,6 +127,18 @@
             display: flex;
             flex-direction: column;
             gap: 12px;
+            animation: panelIn 160ms ease-out;
+        }
+
+        @keyframes panelIn {
+            from {
+                opacity: 0;
+                transform: translateY(4px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         #drop-zone {
@@ -176,6 +198,27 @@
             padding: 5px 8px;
             border-radius: 8px;
             background: rgba(15, 23, 42, 0.9);
+            transition: background 120ms ease, transform 120ms ease, outline-color 120ms ease;
+        }
+
+        .file-row:hover, .queue-row:hover, .result-row:hover {
+            background: rgba(15, 23, 42, 0.98);
+            transform: translateY(-1px);
+        }
+
+        .animate-in {
+            animation: rowIn 180ms ease-out;
+        }
+
+        @keyframes rowIn {
+            from {
+                opacity: 0;
+                transform: translateY(6px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .result-row[draggable="true"] {
@@ -233,6 +276,7 @@
             inset: 0 auto 0 0;
             width: 0%;
             background: linear-gradient(90deg, rgba(56, 189, 248, 0.8), rgba(34, 197, 94, 0.55));
+            transition: width 180ms ease;
         }
 
         .queue-row {
@@ -252,10 +296,21 @@
             height: 100%;
             width: 0%;
             background: linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(56, 189, 248, 0.12));
+            transition: width 180ms ease;
         }
 
         .queue-row.is-running {
             outline: 1px solid rgba(56, 189, 248, 0.35);
+            animation: runningPulse 1.4s ease-in-out infinite;
+        }
+
+        @keyframes runningPulse {
+            0%, 100% {
+                box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+            }
+            50% {
+                box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.08);
+            }
         }
 
         .queue-row > :not(.queue-progress) {
@@ -297,6 +352,67 @@
             justify-content: space-between;
             gap: 10px;
             margin-top: 8px;
+        }
+
+        .footer-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .selection-count {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .output-row {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            max-width: 620px;
+        }
+
+        .output-row .output-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .output-row .output-path {
+            font-size: 11px;
+            color: var(--text-main);
+            max-width: 360px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .panel-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .panel-toolbar input[type="search"],
+        .panel-toolbar input[type="text"] {
+            width: 260px;
+            max-width: 100%;
+            border-radius: 999px;
+            border: 1px solid var(--border-subtle);
+            padding: 6px 12px;
+            background: rgba(15, 23, 42, 0.9);
+            color: var(--text-main);
+            outline: none;
+        }
+
+        .panel-toolbar input[type="search"]:focus,
+        .panel-toolbar input[type="text"]:focus {
+            border-color: rgba(56, 189, 248, 0.6);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.10);
         }
 
         select, button {
@@ -342,10 +458,20 @@
             background: rgba(15, 23, 42, 0.85);
             color: var(--text-main);
             cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease;
         }
 
         button.secondary:hover {
             border-color: rgba(56, 189, 248, 0.6);
+            background: rgba(15, 23, 42, 0.92);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation: none !important;
+                transition: none !important;
+                scroll-behavior: auto !important;
+            }
         }
 
         button.small {
@@ -356,6 +482,56 @@
         .hint {
             font-size: 11px;
             color: var(--text-muted);
+        }
+
+        .empty-state {
+            padding: 14px 10px;
+            color: var(--text-muted);
+            font-size: 12px;
+            text-align: center;
+        }
+
+        .stats-board {
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.85);
+            padding: 10px 10px;
+            box-sizing: border-box;
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .stat {
+            border-radius: 10px;
+            border: 1px solid rgba(31, 41, 55, 0.7);
+            background: rgba(2, 6, 23, 0.35);
+            padding: 8px 10px;
+            min-width: 0;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .stat-value {
+            font-size: 12px;
+            color: var(--text-main);
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        @media (max-width: 820px) {
+            .stats-board {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         .convert-disabled-reason {
@@ -369,7 +545,7 @@
 <body>
     <div id="app">
         <header>
-            <div>
+            <div class="titlebar">
                 <h1>Convertable</h1>
                 <span>Drop files, pick a target, convert.</span>
             </div>
@@ -406,7 +582,8 @@
                 <div class="convert-footer">
                     <div class="hint">Select a target extension, then Convert.</div>
                     <div style="display:flex; flex-direction:column; gap: 6px; align-items:flex-end;">
-                        <div style="display:flex; gap: 10px; align-items:center;">
+                        <div class="footer-actions">
+                            <span class="selection-count" id="selection-count">0 selected</span>
                             <select id="target-ext-select" aria-label="Target extension">
                                 <option value=".PNG">.PNG</option>
                                 <option value=".JPEG">.JPEG</option>
@@ -417,7 +594,15 @@
                                 <option value=".MP4">.MP4</option>
                                 <option value=".MOV">.MOV</option>
                             </select>
+                            <button class="secondary small" id="clear-files-button" type="button">Clear Files</button>
                             <button class="primary" id="convert-button" type="button">Convert</button>
+                        </div>
+                        <div class="output-row" aria-label="Output folder">
+                            <span class="output-label">Output:</span>
+                            <span class="output-path" id="output-dir-label" title="">Temp (session)</span>
+                            <button class="secondary small" id="output-dir-change" type="button">Change…</button>
+                            <button class="secondary small" id="output-dir-reset" type="button">Reset</button>
+                            <button class="secondary small" id="output-dir-reveal" type="button">Reveal</button>
                         </div>
                         <div class="convert-disabled-reason" id="convert-disabled-reason" hidden></div>
                     </div>
@@ -425,10 +610,39 @@
             </section>
 
             <section class="tab-panel" id="tab-queue">
+                <div class="stats-board" id="queue-stats" aria-label="Overall stats">
+                    <div class="stat">
+                        <div class="stat-label">Overall</div>
+                        <div class="stat-value" id="stat-overall-pct">0%</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">ETA</div>
+                        <div class="stat-value" id="stat-eta">—</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Current job</div>
+                        <div class="stat-value" id="stat-current">—</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Data processed</div>
+                        <div class="stat-value" id="stat-bytes">—</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Jobs</div>
+                        <div class="stat-value" id="stat-jobs">0/0</div>
+                    </div>
+                </div>
                 <div class="queue-list" id="queue-list" aria-label="Queue"></div>
             </section>
 
             <section class="tab-panel" id="tab-result">
+                <div class="panel-toolbar">
+                    <div class="hint">Tip: drag results to Finder/Desktop.</div>
+                    <div style="display:flex; gap: 8px; align-items:center;">
+                        <input id="result-filter" type="search" placeholder="Filter results…" aria-label="Filter results" />
+                        <button class="secondary small" id="clear-results-button" type="button">Clear Results</button>
+                    </div>
+                </div>
                 <div class="result-list" id="result-list" aria-label="Results"></div>
             </section>
         </main>

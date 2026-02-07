@@ -40,6 +40,18 @@ const api = {
 		ipcRenderer.send('files/startDrag', { path });
 	},
 
+	getOutputDir() {
+		return ipcRenderer.invoke('settings/getOutputDir');
+	},
+
+	pickOutputDir() {
+		return ipcRenderer.invoke('settings/pickOutputDir');
+	},
+
+	resetOutputDir() {
+		return ipcRenderer.invoke('settings/resetOutputDir');
+	},
+
 	enqueueJobs(jobs) {
 		return ipcRenderer.invoke('engine/enqueue', { jobs });
 	},

@@ -5,6 +5,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import Store from 'electron-store';
+
 import { lookup as mimeLookup } from 'mime-types';
 import sharp from 'sharp';
 import JSZip from 'jszip';
@@ -115,6 +117,70 @@ async function toDroppedFile(filePath: string): Promise<DroppedFile> {
 
 let sessionOutputDir: string | null = null;
 let sessionOutputDirPromise: Promise<string> | null = null;
+
+type Settings = {
+	outputDir: string | null;
+};
+
+let settingsStore: Store<Settings> | null = null;
+
+function getSettingsStore(): Store<Settings> {
+	if (settingsStore) return settingsStore;
+	settingsStore = new Store<Settings>({
+		name: 'settings',
+		defaults: {
+			outputDir: null,
+		},
+		// Schema is optional but helps keep the file sane.
+		schema: {
+			outputDir: {
+				type: ['string', 'null'],
+			},
+		} as any,
+	});
+	return settingsStore;
+}
+
+function normalizeConfiguredOutputDir(value: unknown): string | null {
+	if (typeof value !== 'string') return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	if (!path.isAbsolute(trimmed)) return null;
+	return trimmed;
+}
+
+async function getConfiguredOutputDir(): Promise<string | null> {
+	try {
+		return normalizeConfiguredOutputDir(getSettingsStore().get('outputDir'));
+	} catch {
+		return null;
+	}
+}
+
+async function setConfiguredOutputDir(dirPath: string | null): Promise<string | null> {
+	if (dirPath == null) {
+		getSettingsStore().set('outputDir', null);
+		return null;
+	}
+	const normalized = normalizeConfiguredOutputDir(dirPath);
+	if (!normalized) {
+		throw new Error('Invalid output folder.');
+	}
+	await ensureDir(normalized);
+	getSettingsStore().set('outputDir', normalized);
+	return normalized;
+}
+
+async function resolveEffectiveOutputDir(): Promise<{ configured: string | null; effective: string }> {
+	const configured = await getConfiguredOutputDir();
+	if (configured) {
+		await ensureDir(configured);
+		return { configured, effective: configured };
+	}
+	const effective = await defaultOutputDir();
+	await ensureDir(effective);
+	return { configured: null, effective };
+}
 
 async function defaultOutputDir(): Promise<string> {
 	if (sessionOutputDir) return sessionOutputDir;
@@ -541,6 +607,8 @@ async function spawnFfmpegWithProgress(
 		let bufRemainder = '';
 		let durationSec: number | null = null;
 		let lastProgress = 0;
+		let lastProgressUpdateAt = Date.now();
+		let idleTimer: NodeJS.Timeout | null = null;
 
 		function pushStderrTail(text: string) {
 			stderrTail += text;
@@ -557,6 +625,7 @@ async function spawnFfmpegWithProgress(
 					if (d != null && d > 0) durationSec = d;
 				}
 			}
+
 			// Example: ... time=00:00:05.12 ...
 			if (durationSec != null && durationSec > 0 && onProgress) {
 				const tm = /time=(\d+:\d+:\d+(?:\.\d+)?)/.exec(line);
@@ -567,11 +636,33 @@ async function spawnFfmpegWithProgress(
 						// Avoid noisy updates and regressions.
 						if (p > lastProgress + 0.002) {
 							lastProgress = p;
+							lastProgressUpdateAt = Date.now();
 							onProgress(p);
 						}
 					}
 				}
 			}
+		}
+
+		if (onProgress) {
+			// Some ffmpeg operations (especially container finalization/muxing) can
+			// pause the `time=` counter for a while even though work continues.
+			// Gently advance progress so the UI doesn't look frozen, but never hit 100%
+			// until the process exits successfully.
+			idleTimer = setInterval(() => {
+				if (durationSec == null || durationSec <= 0) return;
+				const idleMs = Date.now() - lastProgressUpdateAt;
+				if (idleMs < 6_000) return;
+				if (lastProgress >= 0.99) return;
+				// Advance slowly: 0.5% per tick after being idle.
+				lastProgress = Math.min(0.99, lastProgress + 0.005);
+				lastProgressUpdateAt = Date.now();
+				try {
+					onProgress(lastProgress);
+				} catch {
+					// ignore
+				}
+			}, 1000);
 		}
 
 		child.stderr.on('data', (buf) => {
@@ -596,6 +687,10 @@ async function spawnFfmpegWithProgress(
 			reject(err);
 		});
 		child.on('close', (code) => {
+			if (idleTimer) {
+				clearInterval(idleTimer);
+				idleTimer = null;
+			}
 			if (code === 0) {
 				resolve();
 				return;
@@ -732,9 +827,7 @@ class ConversionEngine {
 			}
 		};
 
-		const outDir = defaultOutputDir();
-		const outDirResolved = await outDir;
-		await ensureDir(outDirResolved);
+		const { effective: outDirResolved } = await resolveEffectiveOutputDir();
 		// Some conversions (PDF multi-page) may output a different extension (ZIP).
 		let outputPath = withNewExtension(srcPath, targetExt, outDirResolved);
 
@@ -852,6 +945,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+	// Initialize settings after Electron is ready.
+	getSettingsStore();
+
 	ipcMain.on('files/startDrag', (event, args: { path: string }) => {
 		const p = typeof args?.path === 'string' ? args.path : '';
 		if (!p) return;
@@ -946,6 +1042,31 @@ app.whenReady().then(() => {
 		} catch {
 			// ignore
 		}
+	});
+
+	ipcMain.handle('settings/getOutputDir', async () => {
+		const { configured, effective } = await resolveEffectiveOutputDir();
+		return { configured, effective };
+	});
+
+	ipcMain.handle('settings/resetOutputDir', async () => {
+		await setConfiguredOutputDir(null);
+		const { configured, effective } = await resolveEffectiveOutputDir();
+		return { configured, effective };
+	});
+
+	ipcMain.handle('settings/pickOutputDir', async () => {
+		const res = await dialog.showOpenDialog({
+			properties: ['openDirectory', 'createDirectory'],
+		});
+		if (res.canceled || res.filePaths.length === 0) {
+			const { configured, effective } = await resolveEffectiveOutputDir();
+			return { configured, effective, canceled: true };
+		}
+		const picked = res.filePaths[0] ?? '';
+		const configured = await setConfiguredOutputDir(picked);
+		const { effective } = await resolveEffectiveOutputDir();
+		return { configured, effective, canceled: false };
 	});
 
 	ipcMain.handle('engine/enqueue', async (_event, args: { jobs: EnqueueJob[] }) => {

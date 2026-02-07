@@ -12,6 +12,8 @@ type DroppedFile = {
 
 type EnqueueJob = { srcPath: string; targetExt: string };
 
+type OutputDirInfo = { configured: string | null; effective: string };
+
 const api = {
 	getPathsForFiles(files: File[]): string[] {
 		if (!Array.isArray(files)) return [];
@@ -41,6 +43,18 @@ const api = {
 
 	startDrag(path: string): void {
 		ipcRenderer.send('files/startDrag', { path });
+	},
+
+	getOutputDir(): Promise<OutputDirInfo> {
+		return ipcRenderer.invoke('settings/getOutputDir');
+	},
+
+	pickOutputDir(): Promise<OutputDirInfo & { canceled: boolean }> {
+		return ipcRenderer.invoke('settings/pickOutputDir');
+	},
+
+	resetOutputDir(): Promise<OutputDirInfo> {
+		return ipcRenderer.invoke('settings/resetOutputDir');
 	},
 
 	enqueueJobs(jobs: EnqueueJob[]): Promise<void> {

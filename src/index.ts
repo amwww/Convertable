@@ -11,6 +11,9 @@ interface ConvertableAPI {
 	getFileMetadata(paths: string[]): Promise<DroppedFile[]>;
 	revealInFinder(path: string): Promise<void>;
 	startDrag(path: string): void;
+	getOutputDir(): Promise<{ configured: string | null; effective: string }>;
+	pickOutputDir(): Promise<{ configured: string | null; effective: string; canceled: boolean }>;
+	resetOutputDir(): Promise<{ configured: string | null; effective: string }>;
 	enqueueJobs(jobs: { srcPath: string; targetExt: string }[]): Promise<void>;
 	onEngineEvent(handler: (event: EngineEvent) => void): () => void;
 }
@@ -28,18 +31,38 @@ function setupTabs() {
 	const tabPanels = Array.from(
 		document.querySelectorAll<HTMLElement>('.tab-panel'),
 	);
+
+	const setActiveTab = (tab: string) => {
+		tabButtons.forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+		tabPanels.forEach((panel) => {
+			panel.classList.toggle('active', panel.id === `tab-${tab}`);
+		});
+		try {
+			localStorage.setItem('convertable:lastTab', tab);
+		} catch {
+			// ignore
+		}
+	};
 	
 	tabButtons.forEach((btn) => {
 		btn.addEventListener('click', () => {
 			const tab = btn.dataset.tab;
 			if (!tab) return;
-			
-			tabButtons.forEach((b) => b.classList.toggle('active', b === btn));
-			tabPanels.forEach((panel) => {
-				panel.classList.toggle('active', panel.id === `tab-${tab}`);
-			});
+			setActiveTab(tab);
 		});
 	});
+
+	// Restore last tab.
+	try {
+		const last = localStorage.getItem('convertable:lastTab');
+		if (last && tabButtons.some((b) => b.dataset.tab === last)) {
+			setActiveTab(last);
+		}
+	} catch {
+		// ignore
+	}
+
+	return setActiveTab;
 }
 
 function extFromName(name: string): string {
@@ -52,6 +75,31 @@ function humanSize(bytes: number | null): string {
 	if (bytes == null) return '—';
 	const mb = bytes / (1024 * 1024);
 	return `${mb.toFixed(2)} MB`;
+}
+
+function humanBytes(bytes: number | null): string {
+	if (bytes == null) return '—';
+	const abs = Math.max(0, bytes);
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	let u = 0;
+	let v = abs;
+	while (v >= 1024 && u < units.length - 1) {
+		v /= 1024;
+		u += 1;
+	}
+	const digits = u === 0 ? 0 : u === 1 ? 1 : 2;
+	return `${v.toFixed(digits)} ${units[u]}`;
+}
+
+function humanDuration(seconds: number | null): string {
+	if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+	const s = Math.round(seconds);
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h > 0) return `${h}h ${m}m`;
+	if (m > 0) return `${m}m ${sec}s`;
+	return `${sec}s`;
 }
 
 function basename(p: string): string {
@@ -70,12 +118,20 @@ function setupConvertTab() {
 		'pick-files-button',
 	) as HTMLButtonElement | null;
 	const convertDisabledReason = document.getElementById('convert-disabled-reason');
+	const selectionCount = document.getElementById('selection-count');
 	const targetSelect = document.getElementById(
 		'target-ext-select',
 	) as HTMLSelectElement | null;
 	const convertButton = document.getElementById(
 		'convert-button',
 	) as HTMLButtonElement | null;
+	const clearFilesButton = document.getElementById('clear-files-button') as HTMLButtonElement | null;
+	const clearResultsButton = document.getElementById('clear-results-button') as HTMLButtonElement | null;
+	const resultFilter = document.getElementById('result-filter') as HTMLInputElement | null;
+	const outputDirLabel = document.getElementById('output-dir-label');
+	const outputDirChange = document.getElementById('output-dir-change') as HTMLButtonElement | null;
+	const outputDirReset = document.getElementById('output-dir-reset') as HTMLButtonElement | null;
+	const outputDirReveal = document.getElementById('output-dir-reveal') as HTMLButtonElement | null;
 	
 	if (!dropZone || !fileList || !targetSelect || !convertButton) return;
 	
@@ -85,12 +141,46 @@ function setupConvertTab() {
 	const selected = new Set<string>();
 	let lastSelectedIndex = -1;
 
+	let lastRenderedDroppedCount = 0;
+	let lastRenderedQueueCount = 0;
+	let lastRenderedResultsCount = 0;
+
 	let runTotal = 0;
 	let runDone = 0;
 	let currentJobKey: string | null = null;
 	let currentJobName: string | null = null;
 	let currentJobProgress = 0;
+	let runStartMs: number | null = null;
+	let runJobKeys: string[] = [];
+	const jobProgressByKey = new Map<string, number>();
+	const jobBytesByKey = new Map<string, number>();
 	let hideProgressTimer: number | null = null;
+	let resultsFilterText = '';
+	let outputDirEffective: string | null = null;
+	let outputDirConfigured: string | null = null;
+
+	function renderOutputDir() {
+		if (!outputDirLabel) return;
+		const text = outputDirConfigured ? outputDirConfigured : 'Temp (session)';
+		outputDirLabel.textContent = text;
+		outputDirLabel.title = outputDirEffective ?? '';
+		const hasEffective = !!outputDirEffective;
+		if (outputDirReveal) outputDirReveal.disabled = !hasEffective;
+		if (outputDirReset) outputDirReset.disabled = !outputDirConfigured;
+	}
+
+	async function refreshOutputDir() {
+		try {
+			const api = window.convertable;
+			if (!api?.getOutputDir) return;
+			const info = await api.getOutputDir();
+			outputDirConfigured = info.configured;
+			outputDirEffective = info.effective;
+			renderOutputDir();
+		} catch {
+			// ignore
+		}
+	}
 
 	type SourceKind = 'image' | 'audio' | 'video' | 'archive' | 'other';
 
@@ -117,6 +207,17 @@ function setupConvertTab() {
 
 	function activePaths(): string[] {
 		return selected.size > 0 ? Array.from(selected) : dropped.map((f) => f.path);
+	}
+
+	function updateSelectionCount() {
+		if (!selectionCount) return;
+		const total = dropped.length;
+		const active = activePaths().length;
+		if (total === 0) {
+			selectionCount.textContent = '0 selected';
+			return;
+		}
+		selectionCount.textContent = `${active} selected`;
 	}
 
 	function selectionKind(): SourceKind | null {
@@ -152,6 +253,46 @@ function setupConvertTab() {
 		if (convertProgress) convertProgress.hidden = !hasFiles;
 	}
 
+	if (outputDirChange) {
+		outputDirChange.addEventListener('click', async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.pickOutputDir) return;
+				await api.pickOutputDir();
+				await refreshOutputDir();
+			} catch {
+				// ignore
+			}
+		});
+	}
+
+	if (outputDirReset) {
+		outputDirReset.addEventListener('click', async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.resetOutputDir) return;
+				await api.resetOutputDir();
+				await refreshOutputDir();
+			} catch {
+				// ignore
+			}
+		});
+	}
+
+	if (outputDirReveal) {
+		outputDirReveal.addEventListener('click', async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.revealInFinder) return;
+				const p = outputDirEffective;
+				if (!p) return;
+				await api.revealInFinder(p);
+			} catch {
+				// ignore
+			}
+		});
+	}
+
 	function updateTargetOptionsAndConvertState() {
 		if (!targetSelect || !convertButton) return;
 
@@ -169,7 +310,18 @@ function setupConvertTab() {
 			opt.textContent = ext;
 			targetSelect.appendChild(opt);
 		}
-		if (allowed.includes(prev)) targetSelect.value = prev;
+
+		// Restore last target per kind when possible.
+		let desired: string | null = null;
+		if (kind && kind !== 'other') {
+			try {
+				desired = localStorage.getItem(`convertable:lastTarget:${kind}`);
+			} catch {
+				// ignore
+			}
+		}
+		if (desired && allowed.includes(desired)) targetSelect.value = desired;
+		else if (allowed.includes(prev)) targetSelect.value = prev;
 		else if (allowed.length > 0) targetSelect.value = allowed[0] ?? '';
 
 		const hasSelection = activePaths().length > 0;
@@ -192,6 +344,16 @@ function setupConvertTab() {
 			convertDisabledReason.hidden = !reason;
 		}
 	}
+
+	targetSelect.addEventListener('change', () => {
+		const kind = selectionKind();
+		if (!kind || kind === 'other') return;
+		try {
+			localStorage.setItem(`convertable:lastTarget:${kind}`, targetSelect.value);
+		} catch {
+			// ignore
+		}
+	});
 
 	function clearHideProgressTimer() {
 		if (hideProgressTimer != null) {
@@ -225,6 +387,73 @@ function setupConvertTab() {
 		if (currentJobName) parts.push(currentJobName);
 		convertProgressStatus.textContent = parts.join(' — ');
 		convertProgressFill.style.width = `${pct}%`;
+	}
+
+	function jobKey(srcPath: string, targetExt: string): string {
+		return `${srcPath}::${targetExt}`;
+	}
+
+	function overallProgress(): number {
+		if (runTotal <= 0 || runJobKeys.length === 0) return 0;
+		let sum = 0;
+		let count = 0;
+		for (const k of runJobKeys) {
+			const p = jobProgressByKey.get(k);
+			if (typeof p !== 'number') continue;
+			sum += Math.max(0, Math.min(1, p));
+			count += 1;
+		}
+		if (count <= 0) return 0;
+		return Math.max(0, Math.min(1, sum / count));
+	}
+
+	function processedBytesAndTotal(): { processed: number | null; total: number | null } {
+		let total = 0;
+		let processed = 0;
+		let haveAny = false;
+		for (const k of runJobKeys) {
+			const b = jobBytesByKey.get(k);
+			if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) continue;
+			haveAny = true;
+			total += b;
+			const p = jobProgressByKey.get(k) ?? 0;
+			processed += b * Math.max(0, Math.min(1, p));
+		}
+		if (!haveAny) return { processed: null, total: null };
+		return { processed, total };
+	}
+
+	function updateQueueStats() {
+		const elOverall = document.getElementById('stat-overall-pct');
+		const elEta = document.getElementById('stat-eta');
+		const elCurrent = document.getElementById('stat-current');
+		const elBytes = document.getElementById('stat-bytes');
+		const elJobs = document.getElementById('stat-jobs');
+		if (!elOverall || !elEta || !elCurrent || !elBytes || !elJobs) return;
+
+		const running = runTotal > 0 && runDone < runTotal;
+		const p = overallProgress();
+		elOverall.textContent = `${Math.round(p * 100)}%`;
+		elJobs.textContent = `${Math.min(runDone, runTotal)}/${runTotal}`;
+
+		if (!running) {
+			elEta.textContent = '—';
+			elCurrent.textContent = 'No jobs running';
+		} else {
+			elCurrent.textContent = currentJobName
+				? `${currentJobName} (${Math.round(currentJobProgress * 100)}%)`
+				: '—';
+			let eta: number | null = null;
+			if (runStartMs != null && p > 0.02) {
+				const elapsed = (Date.now() - runStartMs) / 1000;
+				eta = (elapsed * (1 - p)) / p;
+			}
+			elEta.textContent = humanDuration(eta);
+		}
+
+		const { processed, total } = processedBytesAndTotal();
+		elBytes.textContent =
+			processed == null || total == null ? '—' : `${humanBytes(processed)} / ${humanBytes(total)}`;
 	}
 
 	async function extractPathsFromDataTransfer(dt: DataTransfer | null): Promise<string[]> {
@@ -327,14 +556,20 @@ function setupConvertTab() {
 		updateConvertLayout();
 		updateTargetOptionsAndConvertState();
 		renderFiles();
+		updateSelectionCount();
 	}
 	
 	function renderFiles() {
 		if (!fileList) return;
+		const animateFromIndex = Math.max(0, Math.min(lastRenderedDroppedCount, dropped.length));
+		lastRenderedDroppedCount = dropped.length;
 		fileList.innerHTML = '';
-		for (const f of dropped) {
+		for (let idx = 0; idx < dropped.length; idx += 1) {
+			const f = dropped[idx];
+			if (!f) continue;
 			const row = document.createElement('div');
 			row.className = 'file-row';
+			if (idx >= animateFromIndex) row.classList.add('animate-in');
 			row.classList.toggle('selected', selected.has(f.path));
 			const name = document.createElement('span');
 			name.className = 'file-name';
@@ -373,6 +608,7 @@ function setupConvertTab() {
 				}
 				renderFiles();
 				updateTargetOptionsAndConvertState();
+				updateSelectionCount();
 			});
 
 			row.append(name, size, mime, ext);
@@ -383,10 +619,23 @@ function setupConvertTab() {
 	function renderQueue() {
 		const queueList = document.getElementById('queue-list');
 		if (!queueList) return;
+		const animateFromIndex = Math.max(0, Math.min(lastRenderedQueueCount, queue.length));
+		lastRenderedQueueCount = queue.length;
 		queueList.innerHTML = '';
-		for (const job of queue) {
+		if (queue.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'empty-state';
+			empty.textContent = 'No jobs running';
+			queueList.appendChild(empty);
+			updateQueueStats();
+			return;
+		}
+		for (let idx = 0; idx < queue.length; idx += 1) {
+			const job = queue[idx];
+			if (!job) continue;
 			const row = document.createElement('div');
 			row.className = 'queue-row';
+			if (idx >= animateFromIndex) row.classList.add('animate-in');
 			row.classList.toggle('is-running', job.status === 'Processing');
 			const progressWrap = document.createElement('div');
 			progressWrap.className = 'queue-progress';
@@ -407,15 +656,25 @@ function setupConvertTab() {
 			row.append(name, status);
 			queueList.appendChild(row);
 		}
+		updateQueueStats();
 	}
 	
 	function renderResults() {
 		const resultList = document.getElementById('result-list');
 		if (!resultList) return;
+		const animateFromIndex = Math.max(0, Math.min(lastRenderedResultsCount, results.length));
+		lastRenderedResultsCount = results.length;
 		resultList.innerHTML = '';
-		for (const item of results) {
+		for (let idx = 0; idx < results.length; idx += 1) {
+			const item = results[idx];
+			if (!item) continue;
+			if (resultsFilterText) {
+				const hay = `${basename(item.outputPath)} ${item.targetExt} ${item.sourceName}`.toLowerCase();
+				if (!hay.includes(resultsFilterText)) continue;
+			}
 			const row = document.createElement('div');
 			row.className = 'result-row';
+			if (idx >= animateFromIndex) row.classList.add('animate-in');
 			row.draggable = true;
 			const name = document.createElement('span');
 			name.className = 'result-name';
@@ -450,6 +709,11 @@ function setupConvertTab() {
 			resultList.appendChild(row);
 		}
 	}
+
+	resultFilter?.addEventListener('input', () => {
+		resultsFilterText = (resultFilter.value || '').trim().toLowerCase();
+		renderResults();
+	});
 	
 	function handleEngineEvent(ev: EngineEvent) {
 		if (ev.type === 'start') {
@@ -461,10 +725,12 @@ function setupConvertTab() {
 				job.progress = 0;
 				renderQueue();
 			}
-			currentJobKey = `${ev.srcPath}::${ev.targetExt}`;
+			currentJobKey = jobKey(ev.srcPath, ev.targetExt);
 			currentJobName = job?.sourceName ?? basename(ev.srcPath);
 			currentJobProgress = 0;
+			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 0);
 			updateConvertProgress();
+			updateQueueStats();
 		} else if (ev.type === 'progress') {
 			const job = queue.find(
 				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
@@ -478,6 +744,8 @@ function setupConvertTab() {
 				currentJobProgress = ev.progress;
 				updateConvertProgress();
 			}
+			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), ev.progress);
+			updateQueueStats();
 		} else if (ev.type === 'done') {
 			const idx = queue.findIndex(
 				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
@@ -504,6 +772,9 @@ function setupConvertTab() {
 			currentJobName = null;
 			currentJobProgress = 0;
 			updateConvertProgress();
+			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 1);
+			if (runDone >= runTotal) runStartMs = null;
+			updateQueueStats();
 		} else if (ev.type === 'error') {
 			const job = queue.find(
 				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
@@ -519,6 +790,9 @@ function setupConvertTab() {
 			currentJobName = null;
 			currentJobProgress = 0;
 			updateConvertProgress();
+			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 1);
+			if (runDone >= runTotal) runStartMs = null;
+			updateQueueStats();
 			// In the future, surface the error message to the user.
 		}
 	}
@@ -577,6 +851,53 @@ function setupConvertTab() {
 			await addFilesByPath(picked.map((p) => p.path));
 		})();
 	});
+
+	clearFilesButton?.addEventListener('click', () => {
+		dropped.splice(0, dropped.length);
+		selected.clear();
+		lastSelectedIndex = -1;
+		runTotal = 0;
+		runDone = 0;
+		currentJobKey = null;
+		currentJobName = null;
+		currentJobProgress = 0;
+		runStartMs = null;
+		runJobKeys = [];
+		jobProgressByKey.clear();
+		jobBytesByKey.clear();
+		queue.splice(0, queue.length);
+		updateConvertLayout();
+		renderFiles();
+		renderQueue();
+		updateTargetOptionsAndConvertState();
+		updateConvertProgress();
+		updateQueueStats();
+		updateSelectionCount();
+	});
+
+	clearResultsButton?.addEventListener('click', () => {
+		results.splice(0, results.length);
+		resultsFilterText = '';
+		if (resultFilter) resultFilter.value = '';
+		renderResults();
+	});
+
+	// Keyboard shortcuts
+	window.addEventListener('keydown', (ev) => {
+		const isMod = ev.metaKey || ev.ctrlKey;
+		if (!isMod) return;
+		const key = ev.key.toLowerCase();
+		if (key === 'o') {
+			ev.preventDefault();
+			pickButton?.click();
+		} else if (key === 'enter') {
+			ev.preventDefault();
+			convertButton?.click();
+		} else if (key === 'k') {
+			ev.preventDefault();
+			clearResultsButton?.click();
+		}
+	});
 	
 	convertButton.addEventListener('click', async () => {
 		if (!window.convertable) {
@@ -600,6 +921,17 @@ function setupConvertTab() {
 		queue.splice(0, queue.length, ...jobs);
 		renderQueue();
 
+		runStartMs = Date.now();
+		runJobKeys = jobs.map((j) => jobKey(j.sourcePath, j.targetExt));
+		jobProgressByKey.clear();
+		jobBytesByKey.clear();
+		for (const j of jobs) {
+			const k = jobKey(j.sourcePath, j.targetExt);
+			jobProgressByKey.set(k, 0);
+			const meta = dropped.find((x) => x.path === j.sourcePath);
+			if (meta?.sizeBytes != null) jobBytesByKey.set(k, meta.sizeBytes);
+		}
+
 		clearHideProgressTimer();
 		runTotal = jobs.length;
 		runDone = 0;
@@ -607,6 +939,7 @@ function setupConvertTab() {
 		currentJobName = null;
 		currentJobProgress = 0;
 		updateConvertProgress();
+		updateQueueStats();
 		
 		await window.convertable.enqueueJobs(
 			jobs.map((j) => ({ srcPath: j.sourcePath, targetExt: j.targetExt })),
@@ -616,13 +949,36 @@ function setupConvertTab() {
 	if (window.convertable) {
 		window.convertable.onEngineEvent(handleEngineEvent);
 	}
+	// Initialize output dir UI.
+	renderOutputDir();
+	void refreshOutputDir();
 
 	updateConvertLayout();
 	updateTargetOptionsAndConvertState();
 	updateConvertProgress();
+	renderQueue();
+	updateQueueStats();
+	updateSelectionCount();
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-	setupTabs();
+	const setActiveTab = setupTabs();
 	setupConvertTab();
+
+	// Tab shortcuts live at the document level.
+	window.addEventListener('keydown', (ev) => {
+		const isMod = ev.metaKey || ev.ctrlKey;
+		if (!isMod) return;
+		const key = ev.key;
+		if (key === '1') {
+			ev.preventDefault();
+			setActiveTab('convert');
+		} else if (key === '2') {
+			ev.preventDefault();
+			setActiveTab('queue');
+		} else if (key === '3') {
+			ev.preventDefault();
+			setActiveTab('result');
+		}
+	});
 });
