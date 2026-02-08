@@ -74,19 +74,38 @@ async function maybeLoadLatestRelease() {
     const el = document.querySelector('[data-latest-version]');
     if (el && tag) el.textContent = tag;
 
-    // Map assets by name.
     const assets = Array.isArray(data.assets) ? data.assets : [];
+
     const byName = new Map();
     for (const a of assets) {
       if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
       byName.set(a.name, a.browser_download_url);
     }
 
-    // Update hrefs if matching names exist.
-    document.querySelectorAll('a[data-asset-name]').forEach((link) => {
-      const name = link.getAttribute('data-asset-name');
-      if (!name) return;
-      const dl = byName.get(name);
+    function findByPattern(pattern) {
+      if (!pattern) return '';
+      let re;
+      try {
+        re = new RegExp(pattern);
+      } catch {
+        return '';
+      }
+      for (const a of assets) {
+        if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
+        if (re.test(a.name)) return a.browser_download_url;
+      }
+      return '';
+    }
+
+    // Update hrefs if matching assets exist.
+    document.querySelectorAll('a[data-asset-name], a[data-asset-pattern]').forEach((link) => {
+      const name = link.getAttribute('data-asset-name') || '';
+      const pattern = link.getAttribute('data-asset-pattern') || '';
+
+      let dl = '';
+      if (name) dl = byName.get(name) || '';
+      if (!dl && pattern) dl = findByPattern(pattern);
+
       if (typeof dl === 'string' && dl) link.setAttribute('href', dl);
     });
   } catch {
