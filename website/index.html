@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#060A12" />
+
+  <title>Convertable — Fast, clean file conversion</title>
+  <meta name="description" content="Convertable is a small, fast file conversion app for macOS. Drag files in, pick an output, and run conversions with a multi-worker queue." />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Convertable" />
+  <meta property="og:description" content="Fast, clean file conversion — with a multi-worker queue." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="assets/logo.svg" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Convertable" />
+  <meta name="twitter:description" content="Fast, clean file conversion — with a multi-worker queue." />
+
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    window.CONVERTABLE_RELEASES = { owner: 'amwww', repo: 'Convertable' };
+  </script>
+</head>
+<body>
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="#top" aria-label="Convertable home">
+        <img src="assets/logo.svg" alt="Convertable" />
+        <span>Convertable</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#download">Download</a>
+        <a href="#faq">FAQ</a>
+        <a class="btn btn-primary btn-pill" href="#download"><strong>Download</strong></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <div class="kicker"><span class="dot" aria-hidden="true"></span> Multi-worker queue • Smart progress • Drag & drop</div>
+          <h1>Fast, clean file conversion — without the clutter.</h1>
+          <p class="lead">
+            Convertable is a lightweight desktop app built for speed.
+            Drop files, pick an output format, and run conversions with a queue that can process multiple jobs at once.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#download" aria-label="Download Convertable">
+              <strong>Download for macOS</strong>
+            </a>
+            <a class="btn" href="https://github.com/amwww/Convertable" target="_blank" rel="noreferrer">View on GitHub</a>
+            <span class="badge" data-best-download>Best for: macOS</span>
+          </div>
+
+          <div class="smallprint">
+            <span data-latest-version>v1.0</span> • Apple Silicon build available • No account required
+          </div>
+        </div>
+
+        <aside class="panel" aria-label="App preview">
+          <div class="panel-inner">
+            <div class="mock" role="img" aria-label="Mocked Convertable UI">
+              <div class="mock-top">
+                <span class="mock-dot r"></span>
+                <span class="mock-dot y"></span>
+                <span class="mock-dot g"></span>
+                <span style="margin-left: 8px; color: rgba(148,163,184,.8); font-size: 12px;">Convertable</span>
+              </div>
+              <div class="mock-body">
+                <div class="mock-row">
+                  <div>
+                    <div style="font-weight: 650;">Drag files in</div>
+                    <div style="color: rgba(148,163,184,.85); font-size: 12px;">Images • Audio • Video • Archives</div>
+                  </div>
+                  <span class="badge"><strong>.MP4</strong> → .MOV</span>
+                </div>
+                <div class="mock-row">
+                  <div>
+                    <div style="font-weight: 650;">Queue with workers</div>
+                    <div style="color: rgba(148,163,184,.85); font-size: 12px;">Drag jobs between workers</div>
+                  </div>
+                  <div class="progress" aria-hidden="true"><div></div></div>
+                </div>
+                <div class="mock-row">
+                  <div>
+                    <div style="font-weight: 650;">Clear results</div>
+                    <div style="color: rgba(148,163,184,.85); font-size: 12px;">Reveal output in Finder</div>
+                  </div>
+                  <span class="badge">Done</span>
+                </div>
+              </div>
+            </div>
+
+            <hr class="sep" />
+
+            <div class="grid3" style="grid-template-columns: 1fr; margin-top: 0;">
+              <div class="card">
+                <div class="icon" aria-hidden="true">⚡</div>
+                <h3>Designed to feel instant</h3>
+                <p>Stable progress reporting and quick container remuxing when possible.</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="container">
+        <h2>Features</h2>
+        <p>Everything you need for day-to-day conversions — simple UI, robust engine.</p>
+
+        <div class="grid3">
+          <div class="card">
+            <div class="icon" aria-hidden="true">🧰</div>
+            <h3>Multi-format conversions</h3>
+            <p>Images, audio, video, and archives. Pick a target and queue up the batch.</p>
+          </div>
+          <div class="card">
+            <div class="icon" aria-hidden="true">🧵</div>
+            <h3>CPU limiter</h3>
+            <p>Cap conversion threads to keep your system responsive while processing.</p>
+          </div>
+          <div class="card">
+            <div class="icon" aria-hidden="true">🧠</div>
+            <h3>Smart progress</h3>
+            <p>Tracks ffmpeg progress reliably and avoids “stuck at 70%” surprises.</p>
+          </div>
+          <div class="card">
+            <div class="icon" aria-hidden="true">🗂️</div>
+            <h3>Output control</h3>
+            <p>Choose and persist an output folder, or use a temporary session directory.</p>
+          </div>
+          <div class="card">
+            <div class="icon" aria-hidden="true">🧲</div>
+            <h3>Drag & drop workflow</h3>
+            <p>Drop files in, reorder queued jobs, and drag jobs between worker lanes.</p>
+          </div>
+          <div class="card">
+            <div class="icon" aria-hidden="true">🔔</div>
+            <h3>Notifications</h3>
+            <p>Toasts for per-job results and a final run notification when you’re away.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="download" class="section">
+      <div class="container">
+        <h2>Download</h2>
+        <p>Pick your platform. If you host downloads on GitHub Releases, you can auto-fill links via the optional script.</p>
+
+        <div class="download">
+          <div class="card">
+            <h3 style="margin: 0 0 6px;">Get Convertable</h3>
+            <p style="margin: 0;">Start with the macOS build. Windows/Linux are easy to add later.</p>
+
+            <div class="dl-buttons">
+              <!-- Replace these hrefs with your hosted artifacts. -->
+              <a class="btn btn-primary" href="#" data-asset-name="Convertable-mac-arm64.dmg" aria-label="Download for macOS Apple Silicon">
+                <strong>macOS (Apple Silicon)</strong>
+              </a>
+              <a class="btn" href="#" data-asset-name="Convertable-mac-x64.dmg" aria-label="Download for macOS Intel">
+                macOS (Intel)
+              </a>
+              <a class="btn" href="#" aria-disabled="true" tabindex="-1" style="opacity: .55; cursor: not-allowed;">
+                Windows (soon)
+              </a>
+              <a class="btn" href="#" aria-disabled="true" tabindex="-1" style="opacity: .55; cursor: not-allowed;">
+                Linux (soon)
+              </a>
+            </div>
+
+            <div class="note">
+              Tip: if macOS blocks the app on first run, open System Settings → Privacy & Security and allow it.
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 style="margin: 0 0 6px;">System requirements</h3>
+            <div class="kv" aria-label="Requirements">
+              <div><span>Platform</span><strong>macOS</strong></div>
+              <div><span>Apple Silicon</span><strong>Supported</strong></div>
+              <div><span>Intel</span><strong>Optional build</strong></div>
+              <div><span>Offline</span><strong>Works after install</strong></div>
+            </div>
+            <div class="note">
+              Want the download buttons to always point to the latest build? Enable the GitHub Releases config in the page header.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" class="section">
+      <div class="container">
+        <h2>FAQ</h2>
+        <p>Quick answers to common questions.</p>
+
+        <div class="faq">
+          <details>
+            <summary>Is Convertable free?</summary>
+            <p>Yes — you can distribute it however you like. If you publish it, consider linking back to the repo.</p>
+          </details>
+          <details>
+            <summary>Why does video conversion sometimes slow down near the end?</summary>
+            <p>Final container work (muxing / faststart) can take time on some files. Convertable keeps progress responsive and avoids large “stuck” jumps.</p>
+          </details>
+          <details>
+            <summary>Can I run multiple conversions at once?</summary>
+            <p>Yes. The queue supports multiple workers so you can process jobs in parallel and drag queued items between workers.</p>
+          </details>
+          <details>
+            <summary>Can I choose an output folder?</summary>
+            <p>Yes — set it in Settings. You can also reset to a temporary session folder.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="card">
+          <h2 style="margin: 0;">Ready to convert?</h2>
+          <p style="margin-top: 10px;">Download the app and start processing your files in seconds.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#download"><strong>Download</strong></a>
+            <a class="btn" href="https://github.com/amwww/Convertable/issues" target="_blank" rel="noreferrer">Report an issue</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div>
+        <div style="display:flex; align-items:center; gap: 10px;">
+          <img src="assets/logo.svg" alt="" width="20" height="20" />
+          <strong>Convertable</strong>
+        </div>
+        <div class="note">© <span id="year"></span> Convertable • Built with Electron</div>
+      </div>
+      <div class="mono">
+        <div><a href="https://github.com/amwww/Convertable" target="_blank" rel="noreferrer">GitHub</a></div>
+        <div><a href="#download">Downloads</a></div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

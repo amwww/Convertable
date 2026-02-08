@@ -1,0 +1,445 @@
+/* Convertable marketing site (static)
+   Keep dependency-free: plain HTML + CSS + JS.
+*/
+
+:root {
+  --bg0: #060a12;
+  --bg1: #0b1220;
+  --card: rgba(15, 23, 42, 0.62);
+  --card2: rgba(15, 23, 42, 0.88);
+  --border: rgba(148, 163, 184, 0.16);
+  --text: rgba(248, 250, 252, 0.92);
+  --muted: rgba(148, 163, 184, 0.86);
+  --muted2: rgba(148, 163, 184, 0.66);
+
+  --a: #38bdf8;
+  --b: #a78bfa;
+  --c: #34d399;
+
+  --shadow: 0 24px 60px rgba(0,0,0,0.35);
+  --shadow2: 0 18px 40px rgba(0,0,0,0.28);
+
+  --radius-xl: 24px;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+
+  --container: 1120px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  color: var(--text);
+  background: radial-gradient(1400px 700px at 20% 0%, rgba(56, 189, 248, 0.16), rgba(0,0,0,0) 55%),
+              radial-gradient(1200px 700px at 80% 15%, rgba(167, 139, 250, 0.18), rgba(0,0,0,0) 55%),
+              radial-gradient(1200px 700px at 65% 85%, rgba(52, 211, 153, 0.12), rgba(0,0,0,0) 55%),
+              linear-gradient(180deg, var(--bg0), var(--bg1));
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+               "Apple Color Emoji", "Segoe UI Emoji";
+  line-height: 1.5;
+}
+
+a { color: inherit; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.container {
+  width: min(var(--container), calc(100% - 48px));
+  margin: 0 auto;
+}
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(16px);
+  background: linear-gradient(180deg, rgba(6, 10, 18, 0.85), rgba(6, 10, 18, 0.55));
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+}
+
+.nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand img {
+  width: 28px;
+  height: 28px;
+}
+
+.brand span {
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.nav-links {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.nav-links a {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.nav-links a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn:hover { filter: brightness(1.06); text-decoration: none; }
+.btn:active { transform: translateY(1px); }
+
+.btn-primary {
+  border-color: rgba(56, 189, 248, 0.35);
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.14), rgba(167, 139, 250, 0.12), rgba(52, 211, 153, 0.10));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+}
+
+.btn-primary strong {
+  background: linear-gradient(90deg, var(--a), var(--b), var(--c));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.btn-pill {
+  border-radius: 999px;
+  padding-inline: 14px;
+}
+
+.hero {
+  padding: 70px 0 36px;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 28px;
+  align-items: center;
+}
+
+@media (max-width: 940px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .nav-links a { display: none; }
+}
+
+.kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(2, 6, 23, 0.35);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.kicker .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--a), var(--b), var(--c));
+}
+
+h1 {
+  margin: 14px 0 10px;
+  font-size: clamp(38px, 4vw, 54px);
+  line-height: 1.05;
+  letter-spacing: -0.6px;
+}
+
+.lead {
+  color: var(--muted);
+  font-size: 16px;
+  max-width: 56ch;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+.smallprint {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.panel {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: radial-gradient(900px 400px at 30% 0%, rgba(56, 189, 248, 0.10), rgba(0,0,0,0) 60%),
+              radial-gradient(900px 400px at 80% 35%, rgba(167, 139, 250, 0.09), rgba(0,0,0,0) 60%),
+              rgba(15, 23, 42, 0.42);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.panel-inner {
+  padding: 20px;
+}
+
+.mock {
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.55);
+  overflow: hidden;
+}
+
+.mock-top {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(2, 6, 23, 0.65);
+}
+
+.mock-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  opacity: 0.9;
+}
+
+.mock-dot.r { background: #fb7185; }
+.mock-dot.y { background: #fbbf24; }
+.mock-dot.g { background: #34d399; }
+
+.mock-body {
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.mock-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.badge strong {
+  color: var(--text);
+}
+
+.progress {
+  width: 120px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  width: 65%;
+  background: linear-gradient(90deg, var(--a), var(--b), var(--c));
+}
+
+.section {
+  padding: 44px 0;
+}
+
+.section h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.2px;
+}
+
+.section p {
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+
+.grid3 {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+@media (max-width: 940px) {
+  .grid3 { grid-template-columns: 1fr; }
+}
+
+.card {
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--card);
+  padding: 16px;
+  box-shadow: var(--shadow2);
+}
+
+.card h3 {
+  margin: 2px 0 8px;
+  font-size: 15px;
+}
+
+.card p {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.45);
+  color: var(--text);
+}
+
+.download {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 16px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+@media (max-width: 940px) {
+  .download { grid-template-columns: 1fr; }
+}
+
+.dl-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.kv {
+  display: grid;
+  gap: 8px;
+}
+
+.kv div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.kv span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.kv strong { font-size: 13px; }
+
+.faq {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+details {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.32);
+  border-radius: 16px;
+  padding: 12px 14px;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+details p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.footer {
+  padding: 26px 0 40px;
+  color: var(--muted2);
+  border-top: 1px solid rgba(148, 163, 184, 0.10);
+}
+
+.footer-inner {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.8);
+}
+
+hr.sep {
+  border: 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.10);
+  margin: 22px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
+  .btn:active { transform: none; }
+}
