@@ -10,7 +10,7 @@ type DroppedFile = {
 	ext: string;
 };
 
-type EnqueueJob = { srcPath: string; targetExt: string };
+type EnqueueJob = { srcPath: string; targetExt: string; workerId?: number };
 
 type OutputDirInfo = { configured: string | null; effective: string };
 
@@ -57,8 +57,52 @@ const api = {
 		return ipcRenderer.invoke('settings/resetOutputDir');
 	},
 
+	getCpuThreads(): Promise<number | null> {
+		return ipcRenderer.invoke('settings/getCpuThreads');
+	},
+
+	setCpuThreads(threads: number | null): Promise<number | null> {
+		return ipcRenderer.invoke('settings/setCpuThreads', { threads });
+	},
+
+	copyToClipboard(text: string): Promise<void> {
+		return ipcRenderer.invoke('sys/copyText', { text });
+	},
+
+	cancelCurrent(): Promise<{ canceled: boolean }> {
+		return ipcRenderer.invoke('engine/cancelCurrent');
+	},
+
+	cancelWorker(workerId: number): Promise<{ canceled: boolean }> {
+		return ipcRenderer.invoke('engine/cancelWorker', { workerId });
+	},
+
+	cancelAll(): Promise<{ canceledCurrent: boolean; canceledPending: number }> {
+		return ipcRenderer.invoke('engine/cancelAll');
+	},
+
 	enqueueJobs(jobs: EnqueueJob[]): Promise<void> {
 		return ipcRenderer.invoke('engine/enqueue', { jobs });
+	},
+
+	getWorkerCount(): Promise<number> {
+		return ipcRenderer.invoke('engine/getWorkerCount');
+	},
+
+	setWorkerCount(count: number): Promise<number> {
+		return ipcRenderer.invoke('engine/setWorkerCount', { count });
+	},
+
+	getPaused(): Promise<boolean> {
+		return ipcRenderer.invoke('engine/getPaused');
+	},
+
+	setPaused(paused: boolean): Promise<boolean> {
+		return ipcRenderer.invoke('engine/setPaused', { paused });
+	},
+
+	setPendingQueues(queues: EnqueueJob[][]): Promise<void> {
+		return ipcRenderer.invoke('engine/setPendingQueues', { queues });
 	},
 	
 	onEngineEvent(handler: (event: EngineEvent) => void): () => void {

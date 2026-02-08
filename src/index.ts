@@ -11,10 +11,21 @@ interface ConvertableAPI {
 	getFileMetadata(paths: string[]): Promise<DroppedFile[]>;
 	revealInFinder(path: string): Promise<void>;
 	startDrag(path: string): void;
+	copyToClipboard?(text: string): Promise<void>;
 	getOutputDir(): Promise<{ configured: string | null; effective: string }>;
 	pickOutputDir(): Promise<{ configured: string | null; effective: string; canceled: boolean }>;
 	resetOutputDir(): Promise<{ configured: string | null; effective: string }>;
-	enqueueJobs(jobs: { srcPath: string; targetExt: string }[]): Promise<void>;
+	getCpuThreads?(): Promise<number | null>;
+	setCpuThreads?(threads: number | null): Promise<number | null>;
+	cancelCurrent?(): Promise<{ canceled: boolean } | void>;
+	cancelWorker?(workerId: number): Promise<{ canceled: boolean } | void>;
+	cancelAll?(): Promise<{ canceledCurrent: boolean; canceledPending: number } | void>;
+	getWorkerCount?(): Promise<number>;
+	setWorkerCount?(count: number): Promise<number>;
+	getPaused?(): Promise<boolean>;
+	setPaused?(paused: boolean): Promise<boolean>;
+	setPendingQueues?(queues: { srcPath: string; targetExt: string; workerId?: number }[][]): Promise<void>;
+	enqueueJobs(jobs: { srcPath: string; targetExt: string; workerId?: number }[]): Promise<void>;
 	onEngineEvent(handler: (event: EngineEvent) => void): () => void;
 }
 
@@ -132,17 +143,35 @@ function setupConvertTab() {
 	const outputDirChange = document.getElementById('output-dir-change') as HTMLButtonElement | null;
 	const outputDirReset = document.getElementById('output-dir-reset') as HTMLButtonElement | null;
 	const outputDirReveal = document.getElementById('output-dir-reveal') as HTMLButtonElement | null;
+	const cpuThreadsSelect = document.getElementById('cpu-threads-select') as HTMLSelectElement | null;
+	const cancelAllButton = document.getElementById('cancel-all-button') as HTMLButtonElement | null;
+	const pauseButton = document.getElementById('pause-button') as HTMLButtonElement | null;
+	const workerInc = document.getElementById('worker-inc') as HTMLButtonElement | null;
+	const workerDec = document.getElementById('worker-dec') as HTMLButtonElement | null;
+	const workerCountLabel = document.getElementById('worker-count');
+	const workersContainer = document.getElementById('workers-container');
+	const toastContainer = document.getElementById('toast-container');
+	const resultContextMenu = document.getElementById('result-context-menu');
 	
 	if (!dropZone || !fileList || !targetSelect || !convertButton) return;
 	
 	const dropped: DroppedFile[] = [];
-	const queue: ConversionJob[] = [];
+
+	type WorkerState = {
+		workerId: number;
+		running: ConversionJob | null;
+		pending: ConversionJob[];
+	};
+
+	const workers: WorkerState[] = [];
+	let workerCount = 1;
+	let paused = false;
+	let lastActiveWorkerId = 0;
 	const results: ConversionResultItem[] = [];
 	const selected = new Set<string>();
 	let lastSelectedIndex = -1;
 
 	let lastRenderedDroppedCount = 0;
-	let lastRenderedQueueCount = 0;
 	let lastRenderedResultsCount = 0;
 
 	let runTotal = 0;
@@ -151,6 +180,11 @@ function setupConvertTab() {
 	let currentJobName: string | null = null;
 	let currentJobProgress = 0;
 	let runStartMs: number | null = null;
+	let runEndMs: number | null = null;
+	let runSuccessCount = 0;
+	let runErrorCount = 0;
+	let runCanceledCount = 0;
+	let runCompleteNotified = false;
 	let runJobKeys: string[] = [];
 	const jobProgressByKey = new Map<string, number>();
 	const jobBytesByKey = new Map<string, number>();
@@ -158,6 +192,147 @@ function setupConvertTab() {
 	let resultsFilterText = '';
 	let outputDirEffective: string | null = null;
 	let outputDirConfigured: string | null = null;
+	let contextMenuResultIndex: number | null = null;
+	let dragPendingFrom: { workerId: number; index: number } | null = null;
+	let isDraggingPending = false;
+	let dragInteractionGuardUntil = 0;
+	let renderWorkersScheduled = false;
+	const scheduleRenderWorkers = () => {
+		if (renderWorkersScheduled) return;
+		renderWorkersScheduled = true;
+		window.requestAnimationFrame(() => {
+			renderWorkersScheduled = false;
+			renderWorkers();
+		});
+	};
+
+	function toast(message: string, kind: 'info' | 'success' | 'error' = 'info', timeoutMs = 3800) {
+		if (!toastContainer) return;
+		const el = document.createElement('div');
+		el.className = `toast toast--${kind}`;
+		const msg = document.createElement('div');
+		msg.textContent = message;
+		const close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'toast-close';
+		close.textContent = 'Close';
+		let timer: number | null = null;
+		let removing = false;
+		let removeAfterTimer: number | null = null;
+		const remove = () => {
+			if (removing) return;
+			removing = true;
+			if (timer != null) {
+				window.clearTimeout(timer);
+				timer = null;
+			}
+			// Play exit animation if available.
+			el.classList.add('toast--out');
+			removeAfterTimer = window.setTimeout(() => {
+				removeAfterTimer = null;
+				el.remove();
+			}, 140);
+		};
+		close.addEventListener('click', remove);
+		el.addEventListener('click', (ev) => {
+			if (ev.target === close) return;
+			remove();
+		});
+		el.append(msg, close);
+		toastContainer.appendChild(el);
+		if (timeoutMs > 0) timer = window.setTimeout(remove, timeoutMs);
+	}
+
+	function canSystemNotify(): boolean {
+		return typeof window.Notification !== 'undefined' && Notification.permission !== 'denied';
+	}
+
+	async function ensureNotificationPermission(): Promise<boolean> {
+		if (typeof window.Notification === 'undefined') return false;
+		if (Notification.permission === 'granted') return true;
+		if (Notification.permission === 'denied') return false;
+		try {
+			const p = await Notification.requestPermission();
+			return p === 'granted';
+		} catch {
+			return false;
+		}
+	}
+
+	function shouldNotifyInSystemTray(): boolean {
+		// Avoid spamming when the user is actively watching the app.
+		try {
+			if (document.hidden) return true;
+			if (typeof document.hasFocus === 'function') return !document.hasFocus();
+		} catch {
+			// ignore
+		}
+		return false;
+	}
+
+	async function systemNotify(title: string, body: string) {
+		if (!shouldNotifyInSystemTray()) return;
+		if (!canSystemNotify()) return;
+		const ok = await ensureNotificationPermission();
+		if (!ok) return;
+		try {
+			new Notification(title, { body });
+		} catch {
+			// ignore
+		}
+	}
+
+	function maybeNotifyRunComplete() {
+		if (runCompleteNotified) return;
+		if (runTotal <= 0) return;
+		if (runDone < runTotal) return;
+		runCompleteNotified = true;
+
+		const parts: string[] = [];
+		if (runSuccessCount > 0) parts.push(`${runSuccessCount} done`);
+		if (runErrorCount > 0) parts.push(`${runErrorCount} error${runErrorCount === 1 ? '' : 's'}`);
+		if (runCanceledCount > 0) parts.push(`${runCanceledCount} canceled`);
+		const summary = parts.length > 0 ? parts.join(' • ') : `${runTotal} finished`;
+		void systemNotify('Convertable — Finished', summary);
+	}
+
+	async function copyText(text: string) {
+		const api = window.convertable;
+		try {
+			if (api?.copyToClipboard) {
+				await api.copyToClipboard(text);
+				return;
+			}
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(text);
+				return;
+			}
+		} catch {
+			// ignore
+		}
+		throw new Error('Clipboard copy is not available.');
+	}
+
+	function hideContextMenu() {
+		if (!resultContextMenu) return;
+		resultContextMenu.setAttribute('hidden', '');
+		contextMenuResultIndex = null;
+	}
+
+	function showContextMenu(clientX: number, clientY: number, resultIndex: number) {
+		if (!resultContextMenu) return;
+		contextMenuResultIndex = resultIndex;
+		resultContextMenu.removeAttribute('hidden');
+		// Position and clamp within viewport.
+		const pad = 8;
+		const rect = resultContextMenu.getBoundingClientRect();
+		const maxX = Math.max(pad, window.innerWidth - rect.width - pad);
+		const maxY = Math.max(pad, window.innerHeight - rect.height - pad);
+		const left = Math.max(pad, Math.min(maxX, clientX));
+		const top = Math.max(pad, Math.min(maxY, clientY));
+		(resultContextMenu as HTMLElement).style.left = `${left}px`;
+		(resultContextMenu as HTMLElement).style.top = `${top}px`;
+	}
 
 	function renderOutputDir() {
 		if (!outputDirLabel) return;
@@ -181,6 +356,38 @@ function setupConvertTab() {
 			// ignore
 		}
 	}
+
+	async function refreshCpuThreads() {
+		if (!cpuThreadsSelect) return;
+		const api = window.convertable;
+		if (!api?.getCpuThreads || !api?.setCpuThreads) {
+			cpuThreadsSelect.style.display = 'none';
+			return;
+		}
+		try {
+			const v = await api.getCpuThreads();
+			cpuThreadsSelect.value = String(v ?? 0);
+		} catch {
+			// ignore
+		}
+	}
+
+	cpuThreadsSelect?.addEventListener('change', () => {
+		void (async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.setCpuThreads) return;
+				const raw = Number(cpuThreadsSelect.value);
+				const threads = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : null;
+				const saved = await api.setCpuThreads(threads);
+				cpuThreadsSelect.value = String(saved ?? 0);
+				toast(saved ? `CPU limit: ${saved} thread${saved === 1 ? '' : 's'}` : 'CPU limit: Auto', 'info', 2200);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast(msg || 'Failed to set CPU limit', 'error');
+			}
+		})();
+	});
 
 	type SourceKind = 'image' | 'audio' | 'video' | 'archive' | 'other';
 
@@ -376,21 +583,311 @@ function setupConvertTab() {
 		}
 		if (bar) bar.style.display = '';
 
-		const overall = Math.max(
-			0,
-			Math.min(1, (runDone + (currentJobKey ? currentJobProgress : 0)) / runTotal),
-		);
+		const overall = overallProgress();
 		const pct = Math.round(overall * 100);
 		const parts: string[] = [];
 		parts.push(`${pct}%`);
-		parts.push(`${runDone + 1}/${runTotal}`);
-		if (currentJobName) parts.push(currentJobName);
+		parts.push(`${Math.min(runDone, runTotal)}/${runTotal}`);
+		const rc = runningCount();
+		if (rc > 0) parts.push(`Running: ${rc}`);
+		const active = workers[Math.max(0, Math.min(workers.length - 1, lastActiveWorkerId))];
+		if (active?.running?.sourceName) parts.push(active.running.sourceName);
 		convertProgressStatus.textContent = parts.join(' — ');
 		convertProgressFill.style.width = `${pct}%`;
 	}
 
+	function renderWorkers() {
+		if (!workersContainer) return;
+		ensureWorkers(workerCount);
+		workersContainer.innerHTML = '';
+
+		for (const w of workers) {
+			const card = document.createElement('div');
+			card.className = 'worker-card';
+			card.dataset.workerId = String(w.workerId);
+
+			const header = document.createElement('div');
+			header.className = 'worker-header';
+
+			const title = document.createElement('div');
+			title.className = 'worker-title';
+			title.textContent = `Worker ${w.workerId + 1}`;
+
+			const meta = document.createElement('div');
+			meta.className = 'worker-meta';
+			const runningText = w.running && w.running.status === 'Processing'
+				? `Running: ${w.running.sourceName}`
+				: w.running
+					? `${w.running.status}: ${w.running.sourceName}`
+					: 'Idle';
+			meta.textContent = paused ? `${runningText} (paused)` : runningText;
+
+			const actions = document.createElement('div');
+			actions.className = 'worker-actions';
+			const cancel = document.createElement('button');
+			cancel.type = 'button';
+			cancel.className = 'btn btn-secondary';
+			cancel.textContent = 'Cancel worker';
+			cancel.disabled = !(w.running && w.running.status === 'Processing') && w.pending.length === 0;
+			cancel.addEventListener('click', () => {
+				void (async () => {
+					try {
+						await window.convertable?.cancelWorker?.(w.workerId);
+						toast(`Cancel requested for worker ${w.workerId + 1}`, 'info');
+					} catch (err) {
+						const msg = err instanceof Error ? err.message : String(err);
+						toast(msg || 'Cancel failed', 'error');
+					}
+				})();
+			});
+			actions.appendChild(cancel);
+
+			header.append(title, meta, actions);
+			card.appendChild(header);
+
+			const list = document.createElement('div');
+			list.className = 'worker-queue';
+
+			const addJobRow = (job: ConversionJob, kind: 'running' | 'pending', pendingIndex: number | null) => {
+				const row = document.createElement('div');
+				row.className = 'worker-job';
+				row.classList.toggle('is-running', kind === 'running');
+				row.classList.toggle('is-queued', kind === 'pending');
+				row.dataset.kind = kind;
+				row.dataset.workerId = String(w.workerId);
+				if (pendingIndex != null) row.dataset.index = String(pendingIndex);
+				if (kind === 'pending') row.draggable = true;
+
+				const name = document.createElement('div');
+				name.className = 'worker-job__name';
+				name.textContent = job.sourceName;
+				const status = document.createElement('div');
+				status.className = 'worker-job__status';
+				const p = typeof job.progress === 'number' ? Math.max(0, Math.min(1, job.progress)) : 0;
+				const pct = kind === 'running' ? ` ${(p * 100).toFixed(0)}%` : '';
+				status.textContent = `${job.status}${pct}`;
+				row.append(name, status);
+
+				if (kind === 'pending') {
+					// Guard against frequent progress re-renders interrupting drag initiation.
+					row.addEventListener('pointerdown', () => {
+						dragInteractionGuardUntil = Date.now() + 1500;
+					});
+					row.addEventListener('pointerup', () => {
+						dragInteractionGuardUntil = 0;
+					});
+					row.addEventListener('pointercancel', () => {
+						dragInteractionGuardUntil = 0;
+					});
+
+					row.addEventListener('dragstart', (ev) => {
+						const idx = pendingIndex ?? -1;
+						dragPendingFrom = { workerId: w.workerId, index: idx };
+						isDraggingPending = true;
+						dragInteractionGuardUntil = 0;
+						try {
+							ev.dataTransfer?.setData('text/plain', `${w.workerId}:${idx}`);
+							ev.dataTransfer?.setData(
+								'application/x-convertable-pending',
+								JSON.stringify({ workerId: w.workerId, index: idx }),
+							);
+						} catch {
+							// ignore
+						}
+						if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+					});
+					row.addEventListener('dragend', () => {
+						dragPendingFrom = null;
+						if (isDraggingPending) {
+							isDraggingPending = false;
+							scheduleRenderWorkers();
+						}
+					});
+				}
+
+				return row;
+			};
+
+			if (w.running) list.appendChild(addJobRow(w.running, 'running', null));
+			for (let i = 0; i < w.pending.length; i += 1) {
+				const job = w.pending[i];
+				if (!job) continue;
+				list.appendChild(addJobRow(job, 'pending', i));
+			}
+			if (!w.running && w.pending.length === 0) {
+				const empty = document.createElement('div');
+				empty.className = 'empty-state';
+				empty.textContent = 'Drop jobs here';
+				list.appendChild(empty);
+			}
+
+			const canAcceptDrop = () => {
+				return !!dragPendingFrom;
+			};
+
+			list.addEventListener('dragover', (ev) => {
+				if (!canAcceptDrop()) return;
+				ev.preventDefault();
+				list.classList.add('drag-over');
+				if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+			});
+			list.addEventListener('dragleave', () => {
+				list.classList.remove('drag-over');
+			});
+			list.addEventListener('drop', (ev) => {
+				if (!canAcceptDrop()) return;
+				ev.preventDefault();
+				ev.stopPropagation();
+				list.classList.remove('drag-over');
+
+				const from = dragPendingFrom;
+				dragPendingFrom = null;
+				isDraggingPending = false;
+				if (!from) return;
+				if (from.workerId < 0 || from.workerId >= workers.length) return;
+				const src = workers[from.workerId];
+				const item = src?.pending?.[from.index];
+				if (!src || !item) return;
+
+				let insertAt = w.pending.length;
+				const targetJob = (ev.target as HTMLElement | null)?.closest('.worker-job[data-kind="pending"]') as HTMLElement | null;
+				if (targetJob) {
+					const idxStr = targetJob.dataset.index;
+					const n = idxStr != null ? Number(idxStr) : NaN;
+					if (Number.isFinite(n) && n >= 0) insertAt = Math.max(0, Math.min(w.pending.length, Math.floor(n)));
+				}
+
+				// Remove from source.
+				src.pending.splice(from.index, 1);
+				// If moving within same worker, adjust insert index.
+				if (from.workerId === w.workerId && from.index < insertAt) insertAt = Math.max(0, insertAt - 1);
+				w.pending.splice(insertAt, 0, item);
+				w.pending.forEach((j) => (j.workerId = w.workerId));
+				src.pending.forEach((j) => (j.workerId = src.workerId));
+				lastActiveWorkerId = w.workerId;
+
+				scheduleRenderWorkers();
+				void syncPendingQueuesToEngine();
+			});
+
+			card.appendChild(list);
+			workersContainer.appendChild(card);
+		}
+
+		updateQueueStats();
+		updateConvertProgress();
+		if (cancelAllButton) {
+			const any = workers.some((w) => (w.running && w.running.status === 'Processing') || w.pending.length > 0);
+			cancelAllButton.disabled = !any;
+		}
+	}
+
 	function jobKey(srcPath: string, targetExt: string): string {
 		return `${srcPath}::${targetExt}`;
+	}
+
+	function ensureWorkers(count: number) {
+		let next = Math.floor(count);
+		if (!Number.isFinite(next) || next < 1) next = 1;
+		if (next > 16) next = 16;
+		workerCount = next;
+		while (workers.length < workerCount) {
+			workers.push({ workerId: workers.length, running: null, pending: [] });
+		}
+		if (workers.length > workerCount) {
+			// Merge pending from removed workers into the last one.
+			const last = workerCount - 1;
+			for (let w = workerCount; w < workers.length; w += 1) {
+				const removed = workers[w];
+				if (removed?.pending?.length) workers[last]?.pending.push(...removed.pending);
+			}
+			workers.length = workerCount;
+		}
+		workers.forEach((w, idx) => {
+			w.workerId = idx;
+			w.pending.forEach((j) => (j.workerId = idx));
+			if (w.running) w.running.workerId = idx;
+		});
+		if (workerCountLabel) workerCountLabel.textContent = String(workerCount);
+		if (pauseButton) pauseButton.textContent = paused ? 'Resume' : 'Pause';
+		if (workerDec) {
+			const lastWorkerRunning = workers[workerCount - 1]?.running?.status === 'Processing';
+			workerDec.disabled = workerCount <= 1 || lastWorkerRunning;
+		}
+	}
+
+	function runningCount(): number {
+		let c = 0;
+		for (const w of workers) if (w.running && w.running.status === 'Processing') c += 1;
+		return c;
+	}
+
+	function allPendingQueuesForEngine(): { srcPath: string; targetExt: string; workerId?: number }[][] {
+		return workers.map((w, workerId) =>
+			w.pending.map((j) => ({ srcPath: j.sourcePath, targetExt: j.targetExt, workerId })),
+		);
+	}
+
+	async function syncPendingQueuesToEngine() {
+		const api = window.convertable;
+		if (!api?.setPendingQueues) return;
+		try {
+			await api.setPendingQueues(allPendingQueuesForEngine());
+		} catch {
+			// ignore
+		}
+	}
+
+	function chooseWorkerForNewJob(): number {
+		let best = 0;
+		let bestScore = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < workers.length; i += 1) {
+			const w = workers[i];
+			if (!w) continue;
+			const score = w.pending.length + (w.running && w.running.status === 'Processing' ? 1 : 0);
+			if (score < bestScore) {
+				best = i;
+				bestScore = score;
+			}
+		}
+		return best;
+	}
+
+	function enqueueToWorker(job: ConversionJob, workerId?: number) {
+		ensureWorkers(workerCount);
+		const wid = workerId ?? chooseWorkerForNewJob();
+		const w = workers[Math.max(0, Math.min(workers.length - 1, wid))];
+		if (!w) return;
+		job.workerId = w.workerId;
+		w.pending.push(job);
+		lastActiveWorkerId = w.workerId;
+
+		const k = jobKey(job.sourcePath, job.targetExt);
+		const isNewRun = !runStartMs || runTotal <= 0 || runDone >= runTotal;
+		if (isNewRun) {
+			runStartMs = Date.now();
+			runEndMs = null;
+			runTotal = 1;
+			runDone = 0;
+			runSuccessCount = 0;
+			runErrorCount = 0;
+			runCanceledCount = 0;
+			runCompleteNotified = false;
+			runJobKeys = [k];
+			jobProgressByKey.clear();
+			jobBytesByKey.clear();
+			jobProgressByKey.set(k, 0);
+		} else {
+			runTotal += 1;
+			runJobKeys.push(k);
+			jobProgressByKey.set(k, 0);
+		}
+		const meta = dropped.find((x) => x.path === job.sourcePath);
+		if (meta?.sizeBytes != null) jobBytesByKey.set(k, meta.sizeBytes);
+
+		clearHideProgressTimer();
+		updateConvertProgress();
+		scheduleRenderWorkers();
 	}
 
 	function overallProgress(): number {
@@ -425,24 +922,42 @@ function setupConvertTab() {
 
 	function updateQueueStats() {
 		const elOverall = document.getElementById('stat-overall-pct');
+		const elElapsed = document.getElementById('stat-elapsed');
 		const elEta = document.getElementById('stat-eta');
 		const elCurrent = document.getElementById('stat-current');
 		const elBytes = document.getElementById('stat-bytes');
 		const elJobs = document.getElementById('stat-jobs');
-		if (!elOverall || !elEta || !elCurrent || !elBytes || !elJobs) return;
+		const elOverallFill = document.getElementById('stat-overall-fill') as HTMLElement | null;
+		if (!elOverall || !elElapsed || !elEta || !elCurrent || !elBytes || !elJobs) return;
 
 		const running = runTotal > 0 && runDone < runTotal;
 		const p = overallProgress();
 		elOverall.textContent = `${Math.round(p * 100)}%`;
+		if (elOverallFill) elOverallFill.style.width = `${(p * 100).toFixed(1)}%`;
 		elJobs.textContent = `${Math.min(runDone, runTotal)}/${runTotal}`;
+
+		if (runStartMs == null) {
+			elElapsed.textContent = '—';
+		} else {
+			const endMs = runEndMs ?? Date.now();
+			const elapsedSec = Math.max(0, (endMs - runStartMs) / 1000);
+			elElapsed.textContent = humanDuration(elapsedSec);
+		}
 
 		if (!running) {
 			elEta.textContent = '—';
 			elCurrent.textContent = 'No jobs running';
 		} else {
-			elCurrent.textContent = currentJobName
-				? `${currentJobName} (${Math.round(currentJobProgress * 100)}%)`
-				: '—';
+			const active = workers[Math.max(0, Math.min(workers.length - 1, lastActiveWorkerId))];
+			const runningJob = active?.running?.status === 'Processing'
+				? active.running
+				: workers.find((w) => w.running?.status === 'Processing')?.running;
+			if (runningJob) {
+				const rp = typeof runningJob.progress === 'number' ? runningJob.progress : 0;
+				elCurrent.textContent = `${runningJob.sourceName} (${Math.round(rp * 100)}%)`;
+			} else {
+				elCurrent.textContent = runningCount() > 0 ? 'Running…' : '—';
+			}
 			let eta: number | null = null;
 			if (runStartMs != null && p > 0.02) {
 				const elapsed = (Date.now() - runStartMs) / 1000;
@@ -616,48 +1131,7 @@ function setupConvertTab() {
 		}
 	}
 	
-	function renderQueue() {
-		const queueList = document.getElementById('queue-list');
-		if (!queueList) return;
-		const animateFromIndex = Math.max(0, Math.min(lastRenderedQueueCount, queue.length));
-		lastRenderedQueueCount = queue.length;
-		queueList.innerHTML = '';
-		if (queue.length === 0) {
-			const empty = document.createElement('div');
-			empty.className = 'empty-state';
-			empty.textContent = 'No jobs running';
-			queueList.appendChild(empty);
-			updateQueueStats();
-			return;
-		}
-		for (let idx = 0; idx < queue.length; idx += 1) {
-			const job = queue[idx];
-			if (!job) continue;
-			const row = document.createElement('div');
-			row.className = 'queue-row';
-			if (idx >= animateFromIndex) row.classList.add('animate-in');
-			row.classList.toggle('is-running', job.status === 'Processing');
-			const progressWrap = document.createElement('div');
-			progressWrap.className = 'queue-progress';
-			const progressFill = document.createElement('div');
-			progressFill.className = 'queue-progress__fill';
-			const p = typeof job.progress === 'number' ? Math.max(0, Math.min(1, job.progress)) : 0;
-			progressFill.style.width = `${(p * 100).toFixed(1)}%`;
-			progressWrap.appendChild(progressFill);
-			row.appendChild(progressWrap);
-			const name = document.createElement('span');
-			name.className = 'queue-name';
-			name.textContent = job.sourceName;
-			const status = document.createElement('span');
-			status.className = 'queue-status';
-			const pct = typeof job.progress === 'number' ? ` ${(job.progress * 100).toFixed(0)}%` : '';
-			status.textContent = `${job.status}${pct}`;
-			status.title = job.error ?? '';
-			row.append(name, status);
-			queueList.appendChild(row);
-		}
-		updateQueueStats();
-	}
+	// (legacy) renderQueue removed in favor of renderWorkers
 	
 	function renderResults() {
 		const resultList = document.getElementById('result-list');
@@ -691,7 +1165,14 @@ function setupConvertTab() {
 			reveal.addEventListener('click', (ev) => {
 				ev.preventDefault();
 				ev.stopPropagation();
+				hideContextMenu();
 				void window.convertable?.revealInFinder(item.outputPath);
+			});
+
+			row.addEventListener('contextmenu', (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				showContextMenu(ev.clientX, ev.clientY, idx);
 			});
 
 			row.addEventListener('dragstart', (ev) => {
@@ -710,91 +1191,165 @@ function setupConvertTab() {
 		}
 	}
 
+	// Result context menu wiring
+	if (resultContextMenu) {
+		document.addEventListener('click', (ev) => {
+			if (!resultContextMenu || resultContextMenu.hasAttribute('hidden')) return;
+			const target = ev.target as HTMLElement | null;
+			if (target && resultContextMenu.contains(target)) return;
+			hideContextMenu();
+		});
+		window.addEventListener('blur', hideContextMenu);
+		window.addEventListener('resize', hideContextMenu);
+		window.addEventListener('keydown', (ev) => {
+			if (ev.key === 'Escape') hideContextMenu();
+		});
+		resultContextMenu.addEventListener('click', (ev) => {
+			const target = ev.target as HTMLElement | null;
+			if (!target) return;
+			const btn = target.closest('button[data-action]') as HTMLButtonElement | null;
+			if (!btn) return;
+			const action = btn.dataset.action;
+			const idx = contextMenuResultIndex;
+			if (!action || idx == null) return;
+			const item = results[idx];
+			if (!item) return;
+			hideContextMenu();
+			void (async () => {
+				try {
+					if (action === 'reveal') {
+						await window.convertable?.revealInFinder(item.outputPath);
+						return;
+					}
+					if (action === 'rerun') {
+						const job: ConversionJob = {
+							sourcePath: item.sourcePath,
+							sourceName: item.sourceName ?? basename(item.sourcePath),
+							targetExt: item.targetExt,
+							status: 'Queued',
+							progress: 0,
+						};
+						const wid = chooseWorkerForNewJob();
+						enqueueToWorker(job, wid);
+						await window.convertable?.enqueueJobs([
+							{ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid },
+						]);
+						toast(`Queued: ${basename(job.sourcePath)} → ${job.targetExt}`, 'success');
+						return;
+					}
+					if (action === 'copyPath') {
+						await copyText(item.outputPath);
+						toast('Copied output path', 'success');
+						return;
+					}
+					if (action === 'copyName') {
+						await copyText(basename(item.outputPath));
+						toast('Copied filename', 'success');
+						return;
+					}
+					if (action === 'remove') {
+						results.splice(idx, 1);
+						renderResults();
+						return;
+					}
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					toast(msg || 'Action failed', 'error');
+				}
+			})();
+		});
+	}
+
 	resultFilter?.addEventListener('input', () => {
 		resultsFilterText = (resultFilter.value || '').trim().toLowerCase();
 		renderResults();
 	});
 	
 	function handleEngineEvent(ev: EngineEvent) {
+		ensureWorkers(workerCount);
+		const wid = Math.max(0, Math.min(workers.length - 1, ev.workerId));
+		const w = workers[wid];
+		if (!w) return;
+		lastActiveWorkerId = wid;
+
+		const k = jobKey(ev.srcPath, ev.targetExt);
 		if (ev.type === 'start') {
-			const job = queue.find(
-				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
-			);
-			if (job) {
-				job.status = 'Processing';
-				job.progress = 0;
-				renderQueue();
-			}
-			currentJobKey = jobKey(ev.srcPath, ev.targetExt);
-			currentJobName = job?.sourceName ?? basename(ev.srcPath);
+			// Move from pending -> running
+			const idx = w.pending.findIndex((j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt);
+			const pendingJob = idx >= 0 ? w.pending.splice(idx, 1)[0] : undefined;
+			w.running = pendingJob ?? {
+				sourcePath: ev.srcPath,
+				sourceName: basename(ev.srcPath),
+				targetExt: ev.targetExt,
+				workerId: wid,
+				status: 'Processing',
+				progress: 0,
+			};
+			w.running.status = 'Processing';
+			w.running.progress = 0;
+			jobProgressByKey.set(k, 0);
+			currentJobKey = k;
+			currentJobName = w.running.sourceName;
 			currentJobProgress = 0;
-			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 0);
-			updateConvertProgress();
-			updateQueueStats();
 		} else if (ev.type === 'progress') {
-			const job = queue.find(
-				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
-			);
-			if (job) {
-				job.progress = ev.progress;
-				renderQueue();
+			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+				w.running.progress = ev.progress;
+				w.running.status = 'Processing';
 			}
-			const key = `${ev.srcPath}::${ev.targetExt}`;
-			if (currentJobKey === key) {
-				currentJobProgress = ev.progress;
-				updateConvertProgress();
-			}
-			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), ev.progress);
-			updateQueueStats();
+			jobProgressByKey.set(k, ev.progress);
+			if (currentJobKey === k) currentJobProgress = ev.progress;
 		} else if (ev.type === 'done') {
-			const idx = queue.findIndex(
-				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
-			);
-			const job = idx >= 0 ? queue[idx] : undefined;
-			if (job) {
-				job.status = 'Done';
-				job.progress = 1;
+			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+				w.running.status = 'Done';
+				w.running.progress = 1;
 			}
 			results.push({
 				sourcePath: ev.srcPath,
-				sourceName: job?.sourceName ?? ev.srcPath,
+				sourceName: w.running?.sourceName ?? basename(ev.srcPath),
 				outputPath: ev.outputPath,
 				targetExt: ev.targetExt,
 			});
 			renderResults();
-
-			// Auto-remove finished jobs from the Queue list.
-			if (idx >= 0) queue.splice(idx, 1);
-			renderQueue();
-
+			w.running = null;
 			runDone = Math.min(runTotal, runDone + 1);
-			currentJobKey = null;
-			currentJobName = null;
-			currentJobProgress = 0;
-			updateConvertProgress();
-			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 1);
-			if (runDone >= runTotal) runStartMs = null;
-			updateQueueStats();
+			runSuccessCount += 1;
+			jobProgressByKey.set(k, 1);
+			if (runDone >= runTotal) runEndMs = Date.now();
+			toast(`Finished: ${basename(ev.srcPath)} → ${ev.targetExt}`, 'success', 2400);
+			maybeNotifyRunComplete();
 		} else if (ev.type === 'error') {
-			const job = queue.find(
-				(j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt,
-			);
-			if (job) {
-				job.status = `Error`;
-				job.error = ev.message;
-				renderQueue();
+			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+				w.running.status = 'Error';
+				w.running.error = ev.message;
 			}
-			// Treat errors as finished for overall progress, but keep them visible in Queue.
 			runDone = Math.min(runTotal, runDone + 1);
-			currentJobKey = null;
-			currentJobName = null;
-			currentJobProgress = 0;
-			updateConvertProgress();
-			jobProgressByKey.set(jobKey(ev.srcPath, ev.targetExt), 1);
-			if (runDone >= runTotal) runStartMs = null;
-			updateQueueStats();
-			// In the future, surface the error message to the user.
+			runErrorCount += 1;
+			jobProgressByKey.set(k, 1);
+			if (runDone >= runTotal) runEndMs = Date.now();
+			toast(`Error: ${basename(ev.srcPath)} → ${ev.targetExt}`, 'error', 5200);
+			maybeNotifyRunComplete();
+		} else if (ev.type === 'canceled') {
+			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+				w.running = null;
+			} else {
+				const idx = w.pending.findIndex((j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt);
+				if (idx >= 0) w.pending.splice(idx, 1);
+			}
+			runDone = runTotal > 0 ? Math.min(runTotal, runDone + 1) : runDone;
+			runCanceledCount += 1;
+			jobProgressByKey.set(k, 1);
+			if (runTotal > 0 && runDone >= runTotal) runEndMs = Date.now();
+			toast(`Canceled: ${basename(ev.srcPath)} → ${ev.targetExt}`, 'info');
+			maybeNotifyRunComplete();
 		}
+		// Progress updates can be very frequent. Avoid rerendering worker queues while
+		// the user is dragging a pending job, otherwise DnD gets interrupted.
+		if (ev.type === 'progress' && (isDraggingPending || Date.now() < dragInteractionGuardUntil)) {
+			updateQueueStats();
+			updateConvertProgress();
+			return;
+		}
+		scheduleRenderWorkers();
 	}
 	
 	dropZone.addEventListener('dragover', (e) => {
@@ -862,13 +1417,22 @@ function setupConvertTab() {
 		currentJobName = null;
 		currentJobProgress = 0;
 		runStartMs = null;
+		runEndMs = null;
+		runSuccessCount = 0;
+		runErrorCount = 0;
+		runCanceledCount = 0;
+		runCompleteNotified = false;
 		runJobKeys = [];
 		jobProgressByKey.clear();
 		jobBytesByKey.clear();
-		queue.splice(0, queue.length);
+		ensureWorkers(workerCount);
+		for (const w of workers) {
+			w.running = null;
+			w.pending.splice(0, w.pending.length);
+		}
 		updateConvertLayout();
 		renderFiles();
-		renderQueue();
+		scheduleRenderWorkers();
 		updateTargetOptionsAndConvertState();
 		updateConvertProgress();
 		updateQueueStats();
@@ -879,7 +1443,71 @@ function setupConvertTab() {
 		results.splice(0, results.length);
 		resultsFilterText = '';
 		if (resultFilter) resultFilter.value = '';
+		hideContextMenu();
 		renderResults();
+	});
+
+	cancelAllButton?.addEventListener('click', () => {
+		void (async () => {
+			try {
+				await window.convertable?.cancelAll?.();
+				toast('Cancel all requested', 'info');
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast(msg || 'Cancel failed', 'error');
+			}
+		})();
+	});
+
+	pauseButton?.addEventListener('click', () => {
+		void (async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.setPaused) return;
+				paused = await api.setPaused(!paused);
+				scheduleRenderWorkers();
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast(msg || 'Failed to toggle pause', 'error');
+			}
+		})();
+	});
+
+	workerInc?.addEventListener('click', () => {
+		void (async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.setWorkerCount) return;
+				const next = await api.setWorkerCount(workerCount + 1);
+				ensureWorkers(next);
+				scheduleRenderWorkers();
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast(msg || 'Failed to add worker', 'error');
+			}
+		})();
+	});
+
+	workerDec?.addEventListener('click', () => {
+		void (async () => {
+			try {
+				const api = window.convertable;
+				if (!api?.setWorkerCount) return;
+				const last = workers[Math.max(0, workerCount - 1)];
+				if (workerCount <= 1) return;
+				if (last?.running && last.running.status === 'Processing') {
+					toast('Stop the last worker before removing it', 'info');
+					return;
+				}
+				const next = await api.setWorkerCount(workerCount - 1);
+				ensureWorkers(next);
+				scheduleRenderWorkers();
+				void syncPendingQueuesToEngine();
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast(msg || 'Failed to remove worker', 'error');
+			}
+		})();
 	});
 
 	// Keyboard shortcuts
@@ -918,45 +1546,45 @@ function setupConvertTab() {
 				progress: 0,
 			};
 		});
-		queue.splice(0, queue.length, ...jobs);
-		renderQueue();
 
-		runStartMs = Date.now();
-		runJobKeys = jobs.map((j) => jobKey(j.sourcePath, j.targetExt));
-		jobProgressByKey.clear();
-		jobBytesByKey.clear();
-		for (const j of jobs) {
-			const k = jobKey(j.sourcePath, j.targetExt);
-			jobProgressByKey.set(k, 0);
-			const meta = dropped.find((x) => x.path === j.sourcePath);
-			if (meta?.sizeBytes != null) jobBytesByKey.set(k, meta.sizeBytes);
+		const enq: { srcPath: string; targetExt: string; workerId?: number }[] = [];
+		for (const job of jobs) {
+			const wid = chooseWorkerForNewJob();
+			enqueueToWorker(job, wid);
+			enq.push({ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid });
 		}
-
-		clearHideProgressTimer();
-		runTotal = jobs.length;
-		runDone = 0;
-		currentJobKey = null;
-		currentJobName = null;
-		currentJobProgress = 0;
-		updateConvertProgress();
-		updateQueueStats();
-		
-		await window.convertable.enqueueJobs(
-			jobs.map((j) => ({ srcPath: j.sourcePath, targetExt: j.targetExt })),
-		);
+		await window.convertable.enqueueJobs(enq);
 	});
 	
 	if (window.convertable) {
 		window.convertable.onEngineEvent(handleEngineEvent);
 	}
+	async function refreshEngineState() {
+		const api = window.convertable;
+		if (!api) return;
+		try {
+			if (api.getWorkerCount) {
+				workerCount = await api.getWorkerCount();
+				ensureWorkers(workerCount);
+			}
+			if (api.getPaused) {
+				paused = await api.getPaused();
+			}
+			scheduleRenderWorkers();
+		} catch {
+			// ignore
+		}
+	}
 	// Initialize output dir UI.
 	renderOutputDir();
 	void refreshOutputDir();
+	void refreshCpuThreads();
+	void refreshEngineState();
 
 	updateConvertLayout();
 	updateTargetOptionsAndConvertState();
 	updateConvertProgress();
-	renderQueue();
+	scheduleRenderWorkers();
 	updateQueueStats();
 	updateSelectionCount();
 }
@@ -979,6 +1607,9 @@ window.addEventListener('DOMContentLoaded', () => {
 		} else if (key === '3') {
 			ev.preventDefault();
 			setActiveTab('result');
+		} else if (key === '4') {
+			ev.preventDefault();
+			setActiveTab('settings');
 		}
 	});
 });

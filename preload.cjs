@@ -52,8 +52,52 @@ const api = {
 		return ipcRenderer.invoke('settings/resetOutputDir');
 	},
 
+	getCpuThreads() {
+		return ipcRenderer.invoke('settings/getCpuThreads');
+	},
+
+	setCpuThreads(threads) {
+		return ipcRenderer.invoke('settings/setCpuThreads', { threads });
+	},
+
+	copyToClipboard(text) {
+		return ipcRenderer.invoke('sys/copyText', { text });
+	},
+
+	cancelCurrent() {
+		return ipcRenderer.invoke('engine/cancelCurrent');
+	},
+
+	cancelWorker(workerId) {
+		return ipcRenderer.invoke('engine/cancelWorker', { workerId });
+	},
+
+	cancelAll() {
+		return ipcRenderer.invoke('engine/cancelAll');
+	},
+
 	enqueueJobs(jobs) {
 		return ipcRenderer.invoke('engine/enqueue', { jobs });
+	},
+
+	getWorkerCount() {
+		return ipcRenderer.invoke('engine/getWorkerCount');
+	},
+
+	setWorkerCount(count) {
+		return ipcRenderer.invoke('engine/setWorkerCount', { count });
+	},
+
+	getPaused() {
+		return ipcRenderer.invoke('engine/getPaused');
+	},
+
+	setPaused(paused) {
+		return ipcRenderer.invoke('engine/setPaused', { paused });
+	},
+
+	setPendingQueues(queues) {
+		return ipcRenderer.invoke('engine/setPendingQueues', { queues });
 	},
 
 	onEngineEvent(handler) {
