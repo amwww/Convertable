@@ -1388,7 +1388,26 @@ function setupConvertTab() {
 
 	// Electron default behavior when dropping a file onto the window is to try
 	// to navigate/open it. Prevent that and accept drops anywhere.
+	const isExternalFileDrag = (dt: DataTransfer | null): boolean => {
+		if (!dt) return false;
+		try {
+			if (dt.files && dt.files.length > 0) return true;
+		} catch {
+			// ignore
+		}
+		try {
+			const types = Array.from(dt.types ?? []);
+			if (types.includes('Files')) return true;
+			if (types.includes('text/uri-list')) return true;
+			if (types.includes('public.file-url')) return true;
+		} catch {
+			// ignore
+		}
+		return false;
+	};
 	const preventDragDefaults = (e: DragEvent) => {
+		// Only intercept OS file drags; allow internal app DnD to flow to targets.
+		if (!isExternalFileDrag(e.dataTransfer)) return;
 		e.preventDefault();
 		e.stopPropagation();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
@@ -1396,6 +1415,8 @@ function setupConvertTab() {
 	window.addEventListener('dragenter', preventDragDefaults, { capture: true });
 	window.addEventListener('dragover', preventDragDefaults, { capture: true });
 	window.addEventListener('drop', (e) => {
+		// Only handle external file drops at the window level.
+		if (!isExternalFileDrag(e.dataTransfer)) return;
 		void handleDropEvent(e);
 	}, { capture: true });
 
