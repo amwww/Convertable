@@ -10,7 +10,14 @@
     "dev:watch": "concurrently -k -n TSC,ELECTRON -c cyan,magenta \"npm run watch\" \"npm run electron:watch\"",
     "build": "tsc",
     "pack:mac": "npm run build && electron-builder --mac --dir",
+    "pack:mac:unsigned": "npm run build && electron-builder --mac --dir -c.mac.identity=null",
+    "pack:mac:arm64": "npm run build && electron-builder --mac --arm64 --dir",
+    "pack:mac:x64": "npm run build && electron-builder --mac --x64 --dir",
     "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac:unsigned": "npm run build && electron-builder --mac -c.mac.identity=null",
+    "dist:mac:arm64": "npm run build && electron-builder --mac --arm64",
+    "dist:mac:x64": "npm run build && electron-builder --mac --x64",
+    "dist:mac:all": "npm run build && electron-builder --mac --arm64 --x64",
     "watch": "tsc -w --preserveWatchOutput",
     "electron:watch": "node scripts/electron-dev.mjs",
     "start": "npm run build && electron ."
@@ -28,9 +35,9 @@
   "homepage": "https://github.com/amwww/Convertable#readme",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@img/sharp-libvips-darwin-arm64": "^1.2.4",
     "7zip-bin": "^5.2.0",
     "adm-zip": "^0.5.16",
+    "electron-updater": "^6.6.2",
     "electron-store": "^10.0.0",
     "jszip": "^3.10.1",
     "mime-types": "^3.0.1",
@@ -39,7 +46,12 @@
     "sharp": "^0.34.3",
     "tar": "^7.5.7"
   },
+  "optionalDependencies": {
+    "@img/sharp-libvips-darwin-arm64": "^1.2.4",
+    "@img/sharp-libvips-darwin-x64": "^1.2.4"
+  },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "@types/adm-zip": "^0.5.7",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^25.0.9",
@@ -54,8 +66,10 @@
   "build": {
     "appId": "com.amwww.convertable",
     "productName": "Convertable",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build-resources"
     },
     "files": [
       "dist/**/*",
@@ -75,11 +89,23 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "entitlements": "build-resources/entitlements.mac.plist",
+      "entitlementsInherit": "build-resources/entitlements.mac.inherit.plist",
       "target": [
-        "dir"
+        "dmg",
+        "zip"
       ],
-      "icon": "tktinker/assets/icon.icns",
-      "identity": null
-    }
+      "icon": "build-resources/icon.icns",
+      "gatekeeperAssess": false
+    },
+    "afterSign": "scripts/notarize.mjs",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "amwww",
+        "repo": "Convertable"
+      }
+    ]
   }
 }

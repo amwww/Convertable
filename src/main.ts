@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell } from 'electron';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1352,6 +1352,77 @@ const engine = new ConversionEngine((event: EngineEvent) => {
 	}
 });
 
+type AutoUpdaterLike = {
+	autoDownload: boolean;
+	on: (event: string, cb: (...args: any[]) => void) => void;
+	checkForUpdates: () => Promise<unknown>;
+	checkForUpdatesAndNotify?: () => Promise<unknown>;
+	quitAndInstall: () => void;
+};
+
+async function setupAutoUpdates(): Promise<AutoUpdaterLike | null> {
+	// In dev (electron . / npm run dev), auto-updater is noisy and not meaningful.
+	if (!app.isPackaged) return null;
+
+	let updater: AutoUpdaterLike;
+	try {
+		const mod: any = await import('electron-updater');
+		updater = (mod?.autoUpdater ?? mod?.default?.autoUpdater) as AutoUpdaterLike;
+	} catch (err) {
+		console.warn('Auto-updater unavailable:', err);
+		return null;
+	}
+	if (!updater) return null;
+
+	// NOTE: On macOS, seamless auto-update installation generally requires a signed + notarized app.
+	// Without that, users frequently hit Gatekeeper errors (e.g. “is damaged and can’t be opened”).
+	// We still check for updates and direct users to download the DMG from GitHub.
+	updater.autoDownload = false;
+
+	updater.on('error', (err: any) => {
+		console.warn('Auto-update error:', err);
+	});
+	updater.on('checking-for-update', () => {
+		console.log('Checking for updates…');
+	});
+	updater.on('update-available', async () => {
+		console.log('Update available.');
+		try {
+			const res = await dialog.showMessageBox({
+				type: 'info',
+				buttons: ['Download update', 'Later'],
+				defaultId: 0,
+				cancelId: 1,
+				message: 'A new version of Convertable is available.',
+				detail: 'Download the latest DMG from GitHub Releases to update.',
+			});
+			if (res.response === 0) {
+				await shell.openExternal('https://github.com/amwww/Convertable/releases/latest');
+			}
+		} catch {
+			// ignore
+		}
+	});
+	updater.on('update-not-available', () => {
+		console.log('No updates available.');
+	});
+	// If you later add signing + notarization, you can switch `autoDownload` back to true
+	// and use the `update-downloaded` event to prompt for restart.
+
+	// Kick off an update check in the background.
+	try {
+		if (typeof updater.checkForUpdatesAndNotify === 'function') {
+			await updater.checkForUpdatesAndNotify();
+		} else {
+			await updater.checkForUpdates();
+		}
+	} catch (err) {
+		console.warn('Auto-update check failed:', err);
+	}
+
+	return updater;
+}
+
 function createWindow() {
 	const isMac = process.platform === 'darwin';
 	const win = new BrowserWindow({
@@ -1410,6 +1481,61 @@ app.whenReady().then(() => {
 	// Initialize settings after Electron is ready.
 	getSettingsStore();
 	applyCpuThreadsToSharp(getConfiguredCpuThreads());
+
+	let autoUpdater: AutoUpdaterLike | null = null;
+	setupAutoUpdates().then((u) => {
+		autoUpdater = u;
+		// Add a simple manual check item.
+		try {
+			const template: Electron.MenuItemConstructorOptions[] = [
+				{
+					label: app.name,
+					submenu: [
+						{ role: 'about' },
+						{ type: 'separator' },
+						{
+							label: 'Check for Updates…',
+							click: async () => {
+								if (!autoUpdater) {
+									await dialog.showMessageBox({
+										type: 'info',
+										message: 'Updates are only available in packaged builds.',
+									});
+									return;
+								}
+								try {
+									await autoUpdater.checkForUpdates();
+								} catch (err) {
+									await dialog.showMessageBox({
+										type: 'error',
+										message: 'Failed to check for updates.',
+										detail: err instanceof Error ? err.message : String(err),
+									});
+								}
+							},
+						},
+						{ type: 'separator' },
+						{ role: 'services' },
+						{ type: 'separator' },
+						{ role: 'hide' },
+						{ role: 'hideOthers' },
+						{ role: 'unhide' },
+						{ type: 'separator' },
+						{ role: 'quit' },
+					],
+				},
+				{ role: 'fileMenu' },
+				{ role: 'editMenu' },
+				{ role: 'viewMenu' },
+				{ role: 'windowMenu' },
+				{ role: 'help' },
+			];
+			const menu = Menu.buildFromTemplate(template);
+			Menu.setApplicationMenu(menu);
+		} catch {
+			// ignore
+		}
+	});
 
 	ipcMain.on('files/startDrag', (event, args: { path: string }) => {
 		const p = typeof args?.path === 'string' ? args.path : '';

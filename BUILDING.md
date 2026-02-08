@@ -35,6 +35,109 @@ Output:
 
 - `release/mac-arm64/Convertable.app` (Apple Silicon)
 
+## Create a macOS `.dmg` installer
+
+This project uses **electron-builder** to generate `.dmg` artifacts.
+
+```bash
+npm run dist:mac
+```
+
+Output (under `release/`):
+
+- `Convertable-<version>-arm64.dmg` (Apple Silicon)
+- `Convertable-<version>-arm64.zip`
+
+Note:
+
+- `npm run pack:mac` is still the easiest way to get a local `.app` bundle.
+- `.dmg`/`.zip` names include the version from `package.json`.
+
+### Build Intel (x64)
+
+```bash
+npm run dist:mac:x64
+```
+
+Output (under `release/`):
+
+- `Convertable-<version>-x64.dmg` (Intel)
+- `Convertable-<version>-x64.zip`
+
+### Build both Apple Silicon + Intel
+
+```bash
+npm run dist:mac:all
+```
+
+Output (under `release/`):
+
+- `Convertable-<version>-arm64.dmg`
+- `Convertable-<version>-arm64.zip`
+- `Convertable-<version>-x64.dmg`
+- `Convertable-<version>-x64.zip`
+
+## In-app auto-updates (GitHub Releases)
+
+This app supports in-app updates via **electron-updater**.
+
+### What to upload to GitHub Releases
+
+For macOS auto-updates, upload these files from `release/`:
+
+- `latest-mac.yml`
+- `Convertable-<version>-arm64.zip`
+- `Convertable-<version>-arm64.zip.blockmap`
+- `Convertable-<version>-x64.zip`
+- `Convertable-<version>-x64.zip.blockmap`
+
+Recommended for first-time installs (website downloads):
+
+- `Convertable-<version>-arm64.dmg`
+- `Convertable-<version>-x64.dmg`
+
+Note: the `.dmg` is for installers; auto-update typically uses the `.zip` + `.blockmap` files.
+
+### Important macOS signing note
+
+For seamless auto-update *installation* to work reliably on other Macs, the app usually must be **code signed** (Developer ID) and **notarized**.
+
+If you don’t have an Apple Developer account, expect macOS Gatekeeper warnings. This repo is configured to still support
+in-app **update checks**, but updates are applied via **manual download** (the app opens GitHub Releases).
+
+## “Convertable is damaged and can’t be opened” (macOS)
+
+This message is usually Gatekeeper blocking an app that is **not signed/notarized** (or has an invalid signature).
+
+### Temporary workaround (local testing)
+
+If you downloaded the app/DMG from the internet, macOS applies a quarantine attribute. You can remove it on the installed app:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Convertable.app"
+```
+
+Then try opening again.
+
+### Proper fix (for real users + auto-updates)
+
+For distribution (and for true in-app auto-install updates), build **signed + notarized** artifacts:
+
+- Install a **Developer ID Application** certificate in your keychain.
+- Set environment variables:
+  - `APPLE_ID`
+  - `APPLE_APP_SPECIFIC_PASSWORD`
+  - `APPLE_TEAM_ID`
+
+This repo includes a notarization hook at [scripts/notarize.mjs](scripts/notarize.mjs). When those env vars are set,
+electron-builder will notarize during `dist:mac` runs.
+
+If you want unsigned builds for local use, use:
+
+```bash
+npm run dist:mac:unsigned
+```
+
 ### Build “dist” artifacts
 
 ```bash
