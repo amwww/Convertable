@@ -1,4 +1,0 @@
-([('Convertable',
-   '/Users/3017079/Desktop/Desktop - '
-   'amwww/Projects/Python/Apps/Convertable/dist/Convertable',
-   'EXECUTABLE')],)
