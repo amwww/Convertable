@@ -57,9 +57,6 @@ function wireSmoothScroll() {
   });
 }
 
-// Optional: GitHub Releases integration.
-// If you host downloads on GitHub Releases, you can enable this by setting
-// window.CONVERTABLE_RELEASES = { owner: 'amwww', repo: 'Convertable' } in index.html.
 async function maybeLoadLatestRelease() {
   const cfg = window.CONVERTABLE_RELEASES;
   if (!cfg || !cfg.owner || !cfg.repo) return;
@@ -84,6 +81,9 @@ async function maybeLoadLatestRelease() {
 
     function findByPattern(pattern) {
       if (!pattern) return '';
+      // Attributes sometimes end up with over-escaped backslashes (e.g. "\\."),
+      // which would make the RegExp look for a literal backslash.
+      pattern = String(pattern).replace(/\\\\/g, '\\');
       let re;
       try {
         re = new RegExp(pattern);
