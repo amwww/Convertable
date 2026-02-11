@@ -57,6 +57,54 @@ function wireSmoothScroll() {
   });
 }
 
+function wireCopyButtons() {
+  document.querySelectorAll('[data-copy-text]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.getAttribute('data-copy-text') || '';
+      if (!text) return;
+
+      const original = btn.textContent;
+      const setLabel = (label) => {
+        try { btn.textContent = label; } catch { /* ignore */ }
+      };
+      const restore = () => {
+        if (typeof original === 'string') setLabel(original);
+      };
+
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(text);
+          setLabel('Copied');
+          window.setTimeout(restore, 1400);
+          return;
+        }
+      } catch {
+        // fall through
+      }
+
+      // Fallback: temporary textarea + execCommand.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.left = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setLabel('Copied');
+        window.setTimeout(restore, 1400);
+      } catch {
+        setLabel('Copy failed');
+        window.setTimeout(restore, 1600);
+      }
+    });
+  });
+}
+
 async function maybeLoadLatestRelease() {
   const cfg = window.CONVERTABLE_RELEASES;
   if (!cfg || !cfg.owner || !cfg.repo) return;
@@ -117,5 +165,6 @@ window.addEventListener('DOMContentLoaded', () => {
   setYear();
   highlightBestDownload();
   wireSmoothScroll();
+  wireCopyButtons();
   void maybeLoadLatestRelease();
 });

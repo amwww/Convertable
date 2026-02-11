@@ -43,10 +43,110 @@ function setupProcessSignalHandlers() {
 
 setupProcessSignalHandlers();
 
+let mainWindow: BrowserWindow | null = null;
+let pendingOpenPaths: string[] = [];
+
+function normalizeFileUrlToPath(maybeUrl: string): string | null {
+	if (!maybeUrl) return null;
+	if (!maybeUrl.startsWith('file://')) return null;
+	try {
+		const url = new URL(maybeUrl);
+		const decoded = decodeURIComponent(url.pathname);
+		return decoded || null;
+	} catch {
+		return null;
+	}
+}
+
+function extractOpenPathsFromArgv(argv: string[]): string[] {
+	const out: string[] = [];
+	for (const raw of argv ?? []) {
+		if (typeof raw !== 'string') continue;
+		const a = raw.trim();
+		if (!a) continue;
+		if (a.startsWith('-')) continue;
+		const fromUrl = normalizeFileUrlToPath(a);
+		const candidate = fromUrl ?? a;
+		if (path.isAbsolute(candidate)) out.push(candidate);
+	}
+	return out;
+}
+
+function enqueueOpenPaths(paths: string[]) {
+	const cleaned = Array.from(new Set((paths ?? []).filter((p) => typeof p === 'string' && p)));
+	if (cleaned.length === 0) return;
+	// Merge into pending.
+	const existing = new Set(pendingOpenPaths);
+	for (const p of cleaned) {
+		if (existing.has(p)) continue;
+		existing.add(p);
+		pendingOpenPaths.push(p);
+	}
+	flushPendingOpenPaths();
+}
+
+function flushPendingOpenPaths() {
+	if (!mainWindow) return;
+	if (pendingOpenPaths.length === 0) return;
+	try {
+		if (mainWindow.webContents.isLoading()) return;
+	} catch {
+		// ignore
+	}
+	const paths = Array.from(new Set(pendingOpenPaths));
+	pendingOpenPaths = [];
+	try {
+		mainWindow.webContents.send('files/opened', { paths });
+	} catch {
+		// If send fails (window destroyed/reloading), re-queue.
+		pendingOpenPaths = paths.concat(pendingOpenPaths);
+	}
+}
+
+// "Open With" / double-click handling
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+	try {
+		app.quit();
+	} catch {
+		// ignore
+	}
+} else {
+	app.on('second-instance', (_event, argv) => {
+		try {
+			if (mainWindow) {
+				if (mainWindow.isMinimized()) mainWindow.restore();
+				mainWindow.show();
+				mainWindow.focus();
+			}
+		} catch {
+			// ignore
+		}
+		enqueueOpenPaths(extractOpenPathsFromArgv(argv));
+	});
+}
+
+// macOS: files opened from Finder while running
+app.on('open-file', (event, filePath) => {
+	event.preventDefault();
+	if (typeof filePath === 'string' && filePath) enqueueOpenPaths([filePath]);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-type EnqueueJob = { srcPath: string; targetExt: string; workerId?: number };
+type EnqueueJob = { srcPath: string; targetExt: string; workerId?: number; scale?: number };
+
+function normalizeScale(scale: unknown): number | undefined {
+	if (scale == null) return undefined;
+	const n = typeof scale === 'number' ? scale : typeof scale === 'string' ? Number(scale) : NaN;
+	if (!Number.isFinite(n) || n <= 0) return undefined;
+	return Math.round(n * 1000) / 1000;
+}
+
+function jobKeyFor(srcPath: string, targetExt: string, scale?: number): string {
+	return `${srcPath}::${targetExt}::${Math.round((scale ?? 1) * 1000) / 1000}`;
+}
 
 class CanceledError extends Error {
 	constructor() {
@@ -69,6 +169,9 @@ type DroppedFile = {
 	sizeBytes: number | null;
 	mime: string;
 	ext: string;
+	mtimeMs?: number;
+	width?: number;
+	height?: number;
 };
 
 const compoundExts = [
@@ -121,12 +224,41 @@ function detectMime(filePath: string): string {
 }
 
 async function toDroppedFile(filePath: string): Promise<DroppedFile> {
+	let sizeBytes: number | null = null;
+	let mtimeMs: number | undefined;
+	try {
+		const st = await fs.stat(filePath);
+		sizeBytes = typeof st.size === 'number' ? st.size : null;
+		mtimeMs = typeof (st as any).mtimeMs === 'number' ? (st as any).mtimeMs : st.mtime?.getTime?.();
+	} catch {
+		sizeBytes = null;
+		mtimeMs = undefined;
+	}
+
+	const mime = detectMime(filePath);
+	let width: number | undefined;
+	let height: number | undefined;
+	const extLower = path.extname(filePath).toLowerCase();
+	const mayBeImage = mime.startsWith('image/') || extLower === '.svg' || extLower === '.png' || extLower === '.jpg' || extLower === '.jpeg' || extLower === '.webp' || extLower === '.gif' || extLower === '.bmp' || extLower === '.tif' || extLower === '.tiff' || extLower === '.heic' || extLower === '.heif' || extLower === '.avif' || extLower === '.ico';
+	if (mayBeImage) {
+		try {
+			const meta = await sharp(filePath).metadata();
+			if (typeof meta.width === 'number' && meta.width > 0) width = meta.width;
+			if (typeof meta.height === 'number' && meta.height > 0) height = meta.height;
+		} catch {
+			// ignore
+		}
+	}
+
 	return {
 		path: filePath,
 		name: path.basename(filePath),
-		sizeBytes: await statSize(filePath),
-		mime: detectMime(filePath),
+		sizeBytes,
+		mime,
 		ext: extUpper(filePath),
+		mtimeMs,
+		width,
+		height,
 	};
 }
 
@@ -300,11 +432,11 @@ async function buildNonCollidingOutputDir(srcPath: string, suffix: string, outDi
 }
 
 function isImageTarget(ext: string): boolean {
-	return ['.PNG', '.JPEG', '.JPG', '.WEBP'].includes(ext.toUpperCase());
+	return ['.PNG', '.JPEG', '.JPG', '.WEBP', '.TIFF', '.TIF'].includes(ext.toUpperCase());
 }
 
 function isMediaTarget(ext: string): boolean {
-	return ['.MP3', '.WAV', '.M4A', '.MP4', '.MOV'].includes(ext.toUpperCase());
+	return ['.MP3', '.WAV', '.M4A', '.AAC', '.FLAC', '.OGG', '.OPUS', '.MP4', '.MOV', '.MKV', '.WEBM'].includes(ext.toUpperCase());
 }
 
 function isArchiveTarget(ext: string): boolean {
@@ -464,9 +596,43 @@ async function convertArchive(srcPath: string, destArchivePath: string, targetEx
 	}
 }
 
-async function convertImage(srcPath: string, destPath: string, targetExt: string): Promise<void> {
+async function convertImage(srcPath: string, destPath: string, targetExt: string, scale?: number): Promise<void> {
 	const t = targetExt.toUpperCase();
-	const img = sharp(srcPath);
+	const s = normalizeScale(scale) ?? 1;
+	const isSvg = path.extname(srcPath).toLowerCase() === '.svg';
+	let desiredSvgSize: { width: number; height: number } | null = null;
+	if (isSvg && s !== 1) {
+		try {
+			const baseMeta = await sharp(srcPath, { density: 72 }).metadata();
+			if (
+				typeof baseMeta.width === 'number' &&
+				typeof baseMeta.height === 'number' &&
+				baseMeta.width > 0 &&
+				baseMeta.height > 0
+			) {
+				desiredSvgSize = {
+					width: Math.max(1, Math.round(baseMeta.width * s)),
+					height: Math.max(1, Math.round(baseMeta.height * s)),
+				};
+			}
+		} catch {
+			// ignore
+		}
+	}
+	const density = isSvg && s !== 1 ? Math.max(10, Math.round(72 * s)) : undefined;
+	let img = density ? sharp(srcPath, { density }) : sharp(srcPath);
+	if (isSvg && desiredSvgSize) {
+		img = img.resize(desiredSvgSize.width, desiredSvgSize.height);
+	}
+
+	if (!isSvg && s !== 1) {
+		const meta = await img.metadata();
+		const w = meta.width;
+		const h = meta.height;
+		if (typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0) {
+			img = img.resize(Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+		}
+	}
 	if (t === '.PNG') {
 		await img.png().toFile(destPath);
 		return;
@@ -475,13 +641,51 @@ async function convertImage(srcPath: string, destPath: string, targetExt: string
 		await img.webp({ quality: 90 }).toFile(destPath);
 		return;
 	}
+	if (t === '.TIFF' || t === '.TIF') {
+		await img.tiff({ compression: 'lzw' }).toFile(destPath);
+		return;
+	}
 	// .JPEG or .JPG
 	await img.jpeg({ quality: 92 }).toFile(destPath);
 }
 
-async function convertImageToPdf(srcPath: string, destPath: string): Promise<void> {
+async function convertImageToPdf(srcPath: string, destPath: string, scale?: number): Promise<void> {
 	// pdf-lib supports embedding PNG/JPEG. We normalize via sharp -> PNG.
-	const pngBytes = await sharp(srcPath).png().toBuffer();
+	const s = normalizeScale(scale) ?? 1;
+	const isSvg = path.extname(srcPath).toLowerCase() === '.svg';
+	let desiredSvgSize: { width: number; height: number } | null = null;
+	if (isSvg && s !== 1) {
+		try {
+			const baseMeta = await sharp(srcPath, { density: 72 }).metadata();
+			if (
+				typeof baseMeta.width === 'number' &&
+				typeof baseMeta.height === 'number' &&
+				baseMeta.width > 0 &&
+				baseMeta.height > 0
+			) {
+				desiredSvgSize = {
+					width: Math.max(1, Math.round(baseMeta.width * s)),
+					height: Math.max(1, Math.round(baseMeta.height * s)),
+				};
+			}
+		} catch {
+			// ignore
+		}
+	}
+	const density = isSvg && s !== 1 ? Math.max(10, Math.round(72 * s)) : undefined;
+	let img = density ? sharp(srcPath, { density }) : sharp(srcPath);
+	if (isSvg && desiredSvgSize) {
+		img = img.resize(desiredSvgSize.width, desiredSvgSize.height);
+	}
+	if (!isSvg && s !== 1) {
+		const meta = await img.metadata();
+		const w = meta.width;
+		const h = meta.height;
+		if (typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0) {
+			img = img.resize(Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+		}
+	}
+	const pngBytes = await img.png().toBuffer();
 	const pdfDoc = await PDFDocument.create();
 	const embedded = await pdfDoc.embedPng(pngBytes);
 	const page = pdfDoc.addPage([embedded.width, embedded.height]);
@@ -654,10 +858,12 @@ async function convertPdfToImages(
 	srcPath: string,
 	outDir: string,
 	targetExt: string,
+	scale?: number,
 	signal?: AbortSignal,
 ): Promise<{ outputPath: string; outputExt: string }> {
 	// sharp can rasterize PDFs (first or all pages) when built with PDF support.
-	const density = 200;
+	const s = normalizeScale(scale) ?? 1;
+	const density = Math.max(10, Math.round(200 * s));
 	const t = targetExt.toUpperCase();
 	const outExt = t === '.JPG' ? '.JPEG' : t;
 
@@ -729,6 +935,16 @@ async function convertPdfToImages(
 async function spawnFfmpeg(args: string[]): Promise<void> {
 	const cmd = await ffmpegCommand();
 	return spawnFfmpegWithProgress(args);
+}
+
+function shellQuotePosix(arg: string): string {
+	// Wrap in single quotes and escape internal single quotes.
+	// Example: abc'def -> 'abc'\''def'
+	return `'${String(arg).replace(/'/g, `'\\''`)}'`;
+}
+
+function formatCommandForCopy(cmd: string, args: string[]): string {
+	return [cmd, ...args].map(shellQuotePosix).join(' ');
 }
 
 function parseHmsTimestamp(value: string): number | null {
@@ -997,6 +1213,7 @@ async function convertWithFfmpeg(
 	destPath: string,
 	targetExt: string,
 	onProgress?: (progress: number) => void,
+	onCommand?: (commandLine: string) => void,
 	signal?: AbortSignal,
 ): Promise<void> {
 	const t = targetExt.toUpperCase();
@@ -1005,6 +1222,7 @@ async function convertWithFfmpeg(
 	const progressFlags: string[] = ['-nostats', '-progress', 'pipe:2'];
 	const cpuThreads = getConfiguredCpuThreads();
 	const threadFlags: string[] = cpuThreads ? ['-threads', String(cpuThreads)] : [];
+	const cmd = await ffmpegCommand();
 
 	// If we try a fast remux and it fails, we may fall back to a slower transcode.
 	// To avoid the UI jumping quickly to (say) 65% then "freezing" until the
@@ -1024,6 +1242,7 @@ async function convertWithFfmpeg(
 		if (t === '.MP4') remuxArgs.push('-movflags', '+faststart');
 		remuxArgs.push(...progressFlags, destPath);
 		try {
+			onCommand?.(formatCommandForCopy(cmd, remuxArgs));
 			await spawnFfmpegWithProgress(
 				remuxArgs,
 				onProgress ? (p) => onProgress(mapStage(p, 0, remuxStageMax)) : undefined,
@@ -1044,16 +1263,43 @@ async function convertWithFfmpeg(
 	const args: string[] = ['-y', '-i', srcPath];
 	if (t === '.MP3') {
 		args.push('-vn', ...threadFlags, '-c:a', 'libmp3lame', '-q:a', '2', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
 		await spawnFfmpegWithProgress(args, onProgress, { signal });
 		return;
 	}
 	if (t === '.WAV') {
 		args.push('-vn', ...threadFlags, '-c:a', 'pcm_s16le', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
 		await spawnFfmpegWithProgress(args, onProgress, { signal });
 		return;
 	}
 	if (t === '.M4A') {
 		args.push('-vn', ...threadFlags, '-c:a', 'aac', '-b:a', '192k', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(args, onProgress, { signal });
+		return;
+	}
+	if (t === '.AAC') {
+		args.push('-vn', ...threadFlags, '-c:a', 'aac', '-b:a', '192k', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(args, onProgress, { signal });
+		return;
+	}
+	if (t === '.FLAC') {
+		args.push('-vn', ...threadFlags, '-c:a', 'flac', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(args, onProgress, { signal });
+		return;
+	}
+	if (t === '.OGG') {
+		args.push('-vn', ...threadFlags, '-c:a', 'libvorbis', '-q:a', '5', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(args, onProgress, { signal });
+		return;
+	}
+	if (t === '.OPUS') {
+		args.push('-vn', ...threadFlags, '-c:a', 'libopus', '-b:a', '128k', ...progressFlags, destPath);
+		onCommand?.(formatCommandForCopy(cmd, args));
 		await spawnFfmpegWithProgress(args, onProgress, { signal });
 		return;
 	}
@@ -1068,6 +1314,49 @@ async function convertWithFfmpeg(
 			...progressFlags,
 			destPath,
 		);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(
+			args,
+			onProgress
+				? (p) => onProgress(mapStage(p, transcodeStageStart, transcodeStageEnd))
+				: undefined,
+			{ signal },
+		);
+		return;
+	}
+	if (t === '.MKV') {
+		args.push(
+			...threadFlags,
+			'-c:v', 'libx264',
+			'-pix_fmt', 'yuv420p',
+			'-c:a', 'aac',
+			'-b:a', '192k',
+			...progressFlags,
+			destPath,
+		);
+		onCommand?.(formatCommandForCopy(cmd, args));
+		await spawnFfmpegWithProgress(
+			args,
+			onProgress
+				? (p) => onProgress(mapStage(p, transcodeStageStart, transcodeStageEnd))
+				: undefined,
+			{ signal },
+		);
+		return;
+	}
+	if (t === '.WEBM') {
+		args.push(
+			...threadFlags,
+			'-c:v', 'libvpx-vp9',
+			'-b:v', '0',
+			'-crf', '32',
+			'-pix_fmt', 'yuv420p',
+			'-c:a', 'libopus',
+			'-b:a', '128k',
+			...progressFlags,
+			destPath,
+		);
+		onCommand?.(formatCommandForCopy(cmd, args));
 		await spawnFfmpegWithProgress(
 			args,
 			onProgress
@@ -1087,6 +1376,7 @@ async function convertWithFfmpeg(
 		...progressFlags,
 		destPath,
 	);
+	onCommand?.(formatCommandForCopy(cmd, args));
 	await spawnFfmpegWithProgress(
 		args,
 		onProgress ? (p) => onProgress(mapStage(p, transcodeStageStart, transcodeStageEnd)) : undefined,
@@ -1168,6 +1458,7 @@ class ConversionEngine {
 				srcPath: j.srcPath,
 				targetExt: j.targetExt,
 				workerId,
+				scale: normalizeScale((j as any)?.scale),
 			});
 			if (!this.paused) this.maybeStartNext(workerId);
 		}
@@ -1178,7 +1469,7 @@ class ConversionEngine {
 		const runningKeys = new Set<string>();
 		for (let w = 0; w < workerCount; w += 1) {
 			const cj = this.currentJobs[w];
-			if (cj) runningKeys.add(`${cj.srcPath}::${cj.targetExt}`);
+			if (cj) runningKeys.add(jobKeyFor(cj.srcPath, cj.targetExt, cj.scale));
 		}
 
 		for (let w = 0; w < workerCount; w += 1) {
@@ -1186,9 +1477,10 @@ class ConversionEngine {
 			const normalized: EnqueueJob[] = [];
 			for (const j of desired) {
 				if (!j || typeof j.srcPath !== 'string' || typeof j.targetExt !== 'string') continue;
-				const key = `${j.srcPath}::${j.targetExt}`;
+				const scale = normalizeScale((j as any)?.scale);
+				const key = jobKeyFor(j.srcPath, j.targetExt, scale);
 				if (runningKeys.has(key)) continue;
-				normalized.push({ srcPath: j.srcPath, targetExt: j.targetExt, workerId: w });
+				normalized.push({ srcPath: j.srcPath, targetExt: j.targetExt, workerId: w, scale });
 			}
 			this.pendingByWorker[w] = normalized;
 			if (!this.paused) this.maybeStartNext(w);
@@ -1221,7 +1513,7 @@ class ConversionEngine {
 			const pendingCanceled = this.pendingByWorker[w]?.splice(0, this.pendingByWorker[w]!.length) ?? [];
 			canceledPending += pendingCanceled.length;
 			for (const j of pendingCanceled) {
-				this.emit({ type: 'canceled', workerId: w, srcPath: j.srcPath, targetExt: j.targetExt });
+				this.emit({ type: 'canceled', workerId: w, srcPath: j.srcPath, targetExt: j.targetExt, scale: j.scale });
 			}
 		}
 		let canceledCurrent = false;
@@ -1238,12 +1530,12 @@ class ConversionEngine {
 		const job = this.pendingByWorker[w]?.shift();
 		if (!job) return;
 		this.processing[w] = true;
-		const { srcPath, targetExt } = job;
+		const { srcPath, targetExt, scale } = job;
 		this.currentJobs[w] = job;
 		this.currentAborts[w] = new AbortController();
 		const signal = this.currentAborts[w]!.signal;
 
-		void this.runOne(w, srcPath, targetExt, signal)
+		void this.runOne(w, srcPath, targetExt, scale, signal)
 			.catch(() => {
 				// runOne already emits error
 			})
@@ -1255,10 +1547,11 @@ class ConversionEngine {
 			});
 	}
 
-	private async runOne(workerId: number, srcPath: string, targetExt: string, signal: AbortSignal): Promise<void> {
+	private async runOne(workerId: number, srcPath: string, targetExt: string, scale: number | undefined, signal: AbortSignal): Promise<void> {
 		throwIfAborted(signal);
-		this.emit({ type: 'start', workerId, srcPath, targetExt });
-		this.emit({ type: 'progress', workerId, srcPath, targetExt, progress: 0 });
+		this.emit({ type: 'start', workerId, srcPath, targetExt, scale });
+		this.emit({ type: 'progress', workerId, srcPath, targetExt, scale, progress: 0 });
+		let lastCommand: string | null = null;
 
 		// Pseudo-progress: many backends don't provide native progress. We emit a
 		// smooth curve up to 95% while work is ongoing, then snap to 100%.
@@ -1271,7 +1564,7 @@ class ConversionEngine {
 			const p = Math.min(0.95, 0.95 * (1 - Math.exp(-elapsed / 1200)));
 			if (p > lastEmitted + 0.005) {
 				lastEmitted = p;
-				this.emit({ type: 'progress', workerId, srcPath, targetExt, progress: p });
+				this.emit({ type: 'progress', workerId, srcPath, targetExt, scale, progress: p });
 			}
 		}, tickMs);
 
@@ -1299,21 +1592,23 @@ class ConversionEngine {
 				}
 				outputPath = await buildNonCollidingOutputPath(srcPath, '.pdf', outDirResolved);
 				throwIfAborted(signal);
-				await convertImageToPdf(srcPath, outputPath);
+				await convertImageToPdf(srcPath, outputPath, scale);
 			} else if (srcMime === 'application/pdf' && isImageTarget(t)) {
-				const res = await convertPdfToImages(srcPath, outDirResolved, t, signal);
+				const res = await convertPdfToImages(srcPath, outDirResolved, t, scale, signal);
 				outputPath = res.outputPath;
 			} else if (isImageTarget(t)) {
 				throwIfAborted(signal);
-				await convertImage(srcPath, outputPath, t);
+				await convertImage(srcPath, outputPath, t, scale);
 			} else if (isMediaTarget(t)) {
 				await convertWithFfmpeg(srcPath, outputPath, t, (p) => {
 					// Switch to real ffmpeg progress once we have it.
 					stopPseudo();
 					if (p > lastEmitted + 0.002) {
 						lastEmitted = p;
-						this.emit({ type: 'progress', workerId, srcPath, targetExt, progress: p });
+						this.emit({ type: 'progress', workerId, srcPath, targetExt, scale, progress: p });
 					}
+				}, (cmdLine) => {
+					lastCommand = cmdLine;
 				}, signal);
 			} else if (isExtractTarget(t)) {
 				if (!isArchiveSourceExt(srcExt)) {
@@ -1331,16 +1626,27 @@ class ConversionEngine {
 				throw new Error(`Unsupported target: ${targetExt}`);
 			}
 			stopPseudo();
-			this.emit({ type: 'progress', workerId, srcPath, targetExt, progress: 1 });
-			this.emit({ type: 'done', workerId, srcPath, outputPath, targetExt });
+			let outputWidth: number | undefined;
+			let outputHeight: number | undefined;
+			try {
+				if (isImageTarget(targetExt) && typeof outputPath === 'string' && outputPath) {
+					const meta = await sharp(outputPath).metadata();
+					if (typeof meta.width === 'number' && meta.width > 0) outputWidth = meta.width;
+					if (typeof meta.height === 'number' && meta.height > 0) outputHeight = meta.height;
+				}
+			} catch {
+				// ignore
+			}
+			this.emit({ type: 'progress', workerId, srcPath, targetExt, scale, progress: 1 });
+			this.emit({ type: 'done', workerId, srcPath, outputPath, targetExt, scale, outputWidth, outputHeight, command: lastCommand ?? undefined });
 		} catch (err) {
 			stopPseudo();
 			if (isCanceledError(err)) {
-				this.emit({ type: 'canceled', workerId, srcPath, targetExt });
+				this.emit({ type: 'canceled', workerId, srcPath, targetExt, scale });
 				return;
 			}
 			const msg = err instanceof Error ? err.message : String(err);
-			this.emit({ type: 'error', workerId, srcPath, targetExt, message: msg });
+			this.emit({ type: 'error', workerId, srcPath, targetExt, message: msg, scale, command: lastCommand ?? undefined });
 			throw err;
 		}
 	}
@@ -1437,6 +1743,10 @@ function createWindow() {
 			nodeIntegration: false,
 		},
 	});
+	mainWindow = win;
+	win.on('closed', () => {
+		if (mainWindow === win) mainWindow = null;
+	});
 	
 	// index.html lives one level up from dist/
 	const htmlPath = path.join(__dirname, '../index.html');
@@ -1444,6 +1754,7 @@ function createWindow() {
 	
 	win.webContents.on('did-finish-load', () => {
 		console.log('Renderer loaded:', htmlPath);
+		flushPendingOpenPaths();
 		win.webContents
 			.executeJavaScript(
 				`(() => ({ hasConvertable: !!window.convertable, keys: window.convertable ? Object.keys(window.convertable) : [] }))()`,
@@ -1591,14 +1902,30 @@ app.whenReady().then(() => {
 					name: 'Supported',
 					extensions: [
 						'png',
+						'svg',
 						'jpg',
 						'jpeg',
 						'webp',
+						'tif',
+						'tiff',
+						'bmp',
+						'gif',
+						'heic',
+						'heif',
+						'avif',
 						'mp3',
 						'wav',
 						'm4a',
+						'aac',
+						'flac',
+						'ogg',
+						'opus',
 						'mp4',
 						'mov',
+						'mkv',
+						'webm',
+						'avi',
+						'm4v',
 						'pdf',
 						'zip',
 						'rar',
@@ -1717,6 +2044,12 @@ app.whenReady().then(() => {
 	});
 	
 	createWindow();
+	// Windows/Linux: files can be passed as argv on initial launch.
+	try {
+		enqueueOpenPaths(extractOpenPathsFromArgv(process.argv));
+	} catch {
+		// ignore
+	}
 	
 	app.on('activate', () => {
 		if (BrowserWindow.getAllWindows().length === 0) {

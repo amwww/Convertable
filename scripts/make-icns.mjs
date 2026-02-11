@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import sharp from 'sharp';
+import pngToIco from 'png-to-ico';
 
 const execFileAsync = promisify(execFile);
 
@@ -10,6 +11,8 @@ const repoRoot = path.resolve(process.cwd());
 const srcSvg = path.join(repoRoot, 'website', 'assets', 'logo.svg');
 const iconsetDir = path.join(repoRoot, 'build-resources', 'icon.iconset');
 const outIcns = path.join(repoRoot, 'build-resources', 'icon.icns');
+const outPng = path.join(repoRoot, 'build-resources', 'icon.png');
+const outIco = path.join(repoRoot, 'build-resources', 'icon.ico');
 
 const iconsetFiles = [
   { size: 16, scale: 1 },
@@ -29,26 +32,48 @@ function iconFilename(size, scale) {
   return `icon_${size}x${size}@2x.png`;
 }
 
+async function renderPng(svgBuffer, px) {
+  return sharp(svgBuffer, { density: 512 })
+    .resize(px, px)
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
 async function main() {
   const svg = await fs.readFile(srcSvg);
 
-  await fs.rm(iconsetDir, { recursive: true, force: true });
-  await fs.mkdir(iconsetDir, { recursive: true });
+  // Linux icon
+  await fs.mkdir(path.dirname(outPng), { recursive: true });
+  await fs.writeFile(outPng, await renderPng(svg, 512));
+  console.log(`Wrote ${path.relative(repoRoot, outPng)}`);
 
-  for (const { size, scale } of iconsetFiles) {
-    const px = size * scale;
-    const outPath = path.join(iconsetDir, iconFilename(size, scale));
-    const png = await sharp(svg, { density: 512 })
-      .resize(px, px)
-      .png({ compressionLevel: 9 })
-      .toBuffer();
-    await fs.writeFile(outPath, png);
+  // Windows icon (.ico)
+  const icoPngs = await Promise.all([
+    renderPng(svg, 16),
+    renderPng(svg, 32),
+    renderPng(svg, 48),
+    renderPng(svg, 64),
+    renderPng(svg, 128),
+    renderPng(svg, 256),
+  ]);
+  await fs.writeFile(outIco, await pngToIco(icoPngs));
+  console.log(`Wrote ${path.relative(repoRoot, outIco)}`);
+
+  // macOS icon (.icns) via iconutil (macOS only)
+  if (process.platform === 'darwin') {
+    await fs.rm(iconsetDir, { recursive: true, force: true });
+    await fs.mkdir(iconsetDir, { recursive: true });
+    for (const { size, scale } of iconsetFiles) {
+      const px = size * scale;
+      const outPath = path.join(iconsetDir, iconFilename(size, scale));
+      await fs.writeFile(outPath, await renderPng(svg, px));
+    }
+    await fs.rm(outIcns, { force: true });
+    await execFileAsync('iconutil', ['-c', 'icns', iconsetDir, '-o', outIcns]);
+    console.log(`Wrote ${path.relative(repoRoot, outIcns)}`);
+  } else {
+    console.log('Skipped .icns (iconutil only available on macOS)');
   }
-
-  await fs.rm(outIcns, { force: true });
-  await execFileAsync('iconutil', ['-c', 'icns', iconsetDir, '-o', outIcns]);
-
-  console.log(`Wrote ${path.relative(repoRoot, outIcns)}`);
 }
 
 main().catch((err) => {

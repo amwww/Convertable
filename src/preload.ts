@@ -10,7 +10,7 @@ type DroppedFile = {
 	ext: string;
 };
 
-type EnqueueJob = { srcPath: string; targetExt: string; workerId?: number };
+type EnqueueJob = { srcPath: string; targetExt: string; workerId?: number; scale?: number };
 
 type OutputDirInfo = { configured: string | null; effective: string };
 
@@ -112,6 +112,17 @@ const api = {
 		ipcRenderer.on('engine/event', listener);
 		return () => {
 			ipcRenderer.removeListener('engine/event', listener);
+		};
+	},
+
+	onOpenFiles(handler: (paths: string[]) => void): () => void {
+		const listener = (_event: Electron.IpcRendererEvent, args: { paths: string[] }) => {
+			const paths = Array.isArray(args?.paths) ? args.paths : [];
+			handler(paths.filter((p) => typeof p === 'string' && p));
+		};
+		ipcRenderer.on('files/opened', listener);
+		return () => {
+			ipcRenderer.removeListener('files/opened', listener);
 		};
 	},
 };

@@ -24,9 +24,10 @@ interface ConvertableAPI {
 	setWorkerCount?(count: number): Promise<number>;
 	getPaused?(): Promise<boolean>;
 	setPaused?(paused: boolean): Promise<boolean>;
-	setPendingQueues?(queues: { srcPath: string; targetExt: string; workerId?: number }[][]): Promise<void>;
-	enqueueJobs(jobs: { srcPath: string; targetExt: string; workerId?: number }[]): Promise<void>;
+	setPendingQueues?(queues: { srcPath: string; targetExt: string; workerId?: number; scale?: number }[][]): Promise<void>;
+	enqueueJobs(jobs: { srcPath: string; targetExt: string; workerId?: number; scale?: number }[]): Promise<void>;
 	onEngineEvent(handler: (event: EngineEvent) => void): () => void;
+	onOpenFiles?(handler: (paths: string[]) => void): () => void;
 }
 
 declare global {
@@ -113,6 +114,26 @@ function humanDuration(seconds: number | null): string {
 	return `${sec}s`;
 }
 
+function formatDateTime(ms: number | null | undefined): string {
+	if (ms == null || !Number.isFinite(ms)) return '—';
+	try {
+		return new Date(ms).toLocaleString();
+	} catch {
+		return '—';
+	}
+}
+
+function formatDims(w?: number, h?: number): string {
+	if (typeof w !== 'number' || typeof h !== 'number') return '—';
+	if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return '—';
+	return `${Math.round(w)}×${Math.round(h)}`;
+}
+
+function formatScalePct(scale?: number): string {
+	const s = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1;
+	return `${Math.round(s * 100)}%`;
+}
+
 function basename(p: string): string {
 	const parts = p.split(/[/\\]/g);
 	return parts[parts.length - 1] || p;
@@ -133,6 +154,8 @@ function setupConvertTab() {
 	const targetSelect = document.getElementById(
 		'target-ext-select',
 	) as HTMLSelectElement | null;
+	const scaleRange = document.getElementById('scale-range') as HTMLInputElement | null;
+	const scaleLabel = document.getElementById('scale-label') as HTMLSpanElement | null;
 	const convertButton = document.getElementById(
 		'convert-button',
 	) as HTMLButtonElement | null;
@@ -152,7 +175,434 @@ function setupConvertTab() {
 	const workersContainer = document.getElementById('workers-container');
 	const toastContainer = document.getElementById('toast-container');
 	const resultContextMenu = document.getElementById('result-context-menu');
-	
+	const helpList = document.getElementById('help-list');
+	const appTooltip = document.getElementById('app-tooltip');
+
+	let imageScale = 1;
+	const scaleStorageKey = 'convertable:imageScalePct';
+	const normalizeScale = (s: number): number => {
+		if (!Number.isFinite(s) || s <= 0) return 1;
+		return Math.round(s * 1000) / 1000;
+	};
+	const setScalePct = (pct: number) => {
+		const snapped = Math.max(25, Math.min(400, Math.round(pct / 25) * 25));
+		imageScale = normalizeScale(snapped / 100);
+		if (scaleRange) scaleRange.value = String(snapped);
+		if (scaleLabel) scaleLabel.textContent = `${snapped}%`;
+		try {
+			localStorage.setItem(scaleStorageKey, String(snapped));
+		} catch {
+			// ignore
+		}
+	};
+
+	if (scaleRange && scaleLabel) {
+		let initialPct = 100;
+		try {
+			const raw = localStorage.getItem(scaleStorageKey);
+			const n = raw ? Number(raw) : NaN;
+			if (Number.isFinite(n)) initialPct = n;
+		} catch {
+			// ignore
+		}
+		setScalePct(initialPct);
+		scaleRange.addEventListener('input', () => {
+			setScalePct(Number(scaleRange.value));
+		});
+	}
+
+	type HelpItem = {
+		ext: string;
+		kind: 'Image' | 'Audio' | 'Video' | 'Archive' | 'PDF' | 'Extract';
+		support: 'Very High' | 'High' | 'Medium' | 'Low' | 'N/A';
+		size: string;
+		desc: string;
+		tooltip: string;
+		tags: string[];
+	};
+
+	const helpItems: HelpItem[] = [
+		{
+			ext: '.SVG',
+			kind: 'Image',
+			support: 'High',
+			size: 'Very small',
+			desc: 'Vector image. Great for logos/diagrams; scales cleanly.',
+			tags: ['Image', 'Vector'],
+			tooltip:
+				'SVG vs PNG: SVG scales infinitely without blur; PNG is better for pixel-perfect screenshots.\nSVG vs JPEG/WebP: SVG is for vector art (logos/diagrams), not photos.\nNote: converting SVG usually means rasterizing it into a bitmap format.',
+		},
+		{
+			ext: '.PNG',
+			kind: 'Image',
+			support: 'High',
+			size: 'Large (lossless)',
+			desc: 'Lossless image. Great for screenshots and graphics.',
+			tags: ['Image', 'Raster'],
+			tooltip:
+				'PNG vs JPEG/WebP: PNG stays crisp for text/UI and is lossless, but files are usually larger.\nBest for: screenshots, UI, logos.\nAvoid for: photos when size matters.',
+		},
+		{
+			ext: '.JPEG',
+			kind: 'Image',
+			support: 'Very High',
+			size: 'Small–Medium',
+			desc: 'Small photos with good quality. Widely compatible.',
+			tags: ['Image', 'Raster'],
+			tooltip:
+				'JPEG vs PNG: much smaller for photos, but can blur text and adds artifacts.\nJPEG vs WebP: often larger at similar quality, but compatibility is extremely strong.\nBest for: photos, sharing.',
+		},
+		{
+			ext: '.JPG',
+			kind: 'Image',
+			support: 'Very High',
+			size: 'Small–Medium',
+			desc: 'Same as JPEG (common extension). Best for photos.',
+			tags: ['Image', 'Raster'],
+			tooltip:
+				'JPG is just JPEG. Same tradeoffs: small for photos, but lossy and not ideal for screenshots/text compared to PNG.\nIf you need maximum compatibility, JPG/JPEG is usually safest.',
+		},
+		{
+			ext: '.WEBP',
+			kind: 'Image',
+			support: 'High',
+			size: 'Small',
+			desc: 'Modern image format with strong compression (web-friendly).',
+			tags: ['Image', 'Raster'],
+			tooltip:
+				'WebP vs JPEG: typically smaller at similar quality.\nWebP vs PNG: can be much smaller for screenshots while still looking good (supports lossless too).\nCompatibility is good on the modern web, but older workflows/tools may prefer JPEG/PNG.',
+		},
+		{
+			ext: '.TIFF',
+			kind: 'Image',
+			support: 'Medium',
+			size: 'Very large',
+			desc: 'High-quality archival/editing format (often large files).',
+			tags: ['Image', 'Raster'],
+			tooltip:
+				'TIFF vs PNG/JPEG: TIFF is common in pro scanning/print/editing workflows and can preserve high fidelity, but is usually much larger.\nChoose TIFF when editing/archiving matters more than compatibility/size.',
+		},
+		{
+			ext: '.PDF',
+			kind: 'PDF',
+			support: 'Very High',
+			size: 'Varies',
+			desc: 'Documents and bundles of pages/images. Great for sharing/printing.',
+			tags: ['Document'],
+			tooltip:
+				'PDF vs images: PDFs are better for multi-page documents and printing/sharing; images are simpler for single pictures.\nPDFs can be compact for text, but image-heavy PDFs can still be large.',
+		},
+		{
+			ext: '.MP3',
+			kind: 'Audio',
+			support: 'Very High',
+			size: 'Small',
+			desc: 'Most compatible audio format. Great for sharing.',
+			tags: ['Audio'],
+			tooltip:
+				'MP3 vs AAC (M4A): similar size/quality; AAC often edges out quality at the same bitrate, but MP3 compatibility is unmatched.\nMP3 vs WAV: WAV is uncompressed (much larger).\nBest for: universal sharing.',
+		},
+		{
+			ext: '.WAV',
+			kind: 'Audio',
+			support: 'High',
+			size: 'Very large',
+			desc: 'Uncompressed audio. Best for editing (large files).',
+			tags: ['Audio'],
+			tooltip:
+				'WAV vs MP3/AAC/Opus: WAV is uncompressed and ideal for editing/mastering, but files are dramatically larger.\nUse WAV when you need maximum fidelity or plan to edit further.',
+		},
+		{
+			ext: '.M4A',
+			kind: 'Audio',
+			support: 'High',
+			size: 'Small',
+			desc: 'AAC audio in an M4A container. Great for Apple devices.',
+			tags: ['Audio'],
+			tooltip:
+				'M4A (AAC) vs MP3: often slightly better quality per bitrate, especially in Apple ecosystems.\nM4A vs Opus: Opus can be smaller at similar quality, but isn\'t as universally supported in every player.',
+		},
+		{
+			ext: '.AAC',
+			kind: 'Audio',
+			support: 'Medium',
+			size: 'Small',
+			desc: 'Raw AAC stream. Good codec but less container metadata/compatibility.',
+			tags: ['Audio'],
+			tooltip:
+				'AAC vs M4A: M4A is typically preferred because it\'s a container with metadata and wider app support.\nChoose .AAC only when you specifically need a raw stream.',
+		},
+		{
+			ext: '.FLAC',
+			kind: 'Audio',
+			support: 'Medium',
+			size: 'Medium–Large',
+			desc: 'Lossless compressed audio. Great for archiving music.',
+			tags: ['Audio'],
+			tooltip:
+				'FLAC vs WAV: both are lossless, but FLAC is smaller.\nFLAC vs MP3/AAC: FLAC preserves all audio data but is larger.\nGreat for archiving; for maximum compatibility, MP3 is easier.',
+		},
+		{
+			ext: '.OGG',
+			kind: 'Audio',
+			support: 'Medium',
+			size: 'Small',
+			desc: 'Ogg/Vorbis audio. Common in open-source and some browsers.',
+			tags: ['Audio'],
+			tooltip:
+				'OGG (Vorbis) vs MP3: often similar results; MP3 tends to be more universally supported across devices.\nOGG vs Opus: Opus is typically better for speech/low bitrates.',
+		},
+		{
+			ext: '.OPUS',
+			kind: 'Audio',
+			support: 'High',
+			size: 'Very small',
+			desc: 'Efficient modern audio codec. Great for speech/streaming.',
+			tags: ['Audio'],
+			tooltip:
+				'Opus vs MP3/AAC: often achieves similar quality at smaller sizes, especially for speech.\nOpus is widely supported in modern apps/browsers, but some older players prefer MP3/M4A.',
+		},
+		{
+			ext: '.MP4',
+			kind: 'Video',
+			support: 'Very High',
+			size: 'Small–Medium',
+			desc: 'Most compatible video container. Best for sharing and playback.',
+			tags: ['Video'],
+			tooltip:
+				'MP4 vs MOV: similar compatibility; MP4 is often the default for sharing.\nMP4 vs MKV: MKV is flexible but less supported on some devices/apps.\nMP4 vs WebM: WebM is great on the web, but MP4 is more universal.',
+		},
+		{
+			ext: '.MOV',
+			kind: 'Video',
+			support: 'High',
+			size: 'Medium',
+			desc: 'Common in Apple/editing workflows. Good for interchange.',
+			tags: ['Video'],
+			tooltip:
+				'MOV vs MP4: both are widely supported; MOV is common in editing/Apple workflows.\nFor maximum universal playback/sharing, MP4 is usually safer.',
+		},
+		{
+			ext: '.MKV',
+			kind: 'Video',
+			support: 'Medium',
+			size: 'Small–Medium',
+			desc: 'Flexible container. Great for storage, less universal on devices.',
+			tags: ['Video'],
+			tooltip:
+				'MKV vs MP4: MKV supports many codecs/subtitles, but some TVs/phones/apps won\'t play it by default.\nUse MKV for archiving; use MP4 for sharing.',
+		},
+		{
+			ext: '.WEBM',
+			kind: 'Video',
+			support: 'High',
+			size: 'Small',
+			desc: 'Web-friendly container (typically VP9/AV1 + Opus).',
+			tags: ['Video'],
+			tooltip:
+				'WebM vs MP4: WebM is great for the modern web and can be very efficient, but MP4 is still the most universal across devices and apps.\nIf “plays everywhere” matters, choose MP4.',
+		},
+		{
+			ext: '.ZIP',
+			kind: 'Archive',
+			support: 'Very High',
+			size: 'Often smaller',
+			desc: 'Universal archive. Great for bundling multiple outputs.',
+			tags: ['Archive'],
+			tooltip:
+				'ZIP vs 7Z: ZIP is more universally supported; 7Z often compresses better.\nZIP vs TAR: TAR is common on Unix systems but not always as convenient on Windows without tools.',
+		},
+		{
+			ext: '.TAR',
+			kind: 'Archive',
+			support: 'High',
+			size: 'Same as inputs',
+			desc: 'Common on Linux/macOS. Bundles files without compression.',
+			tags: ['Archive'],
+			tooltip:
+				'TAR vs ZIP: TAR is great for Unix workflows; ZIP is usually easier for sharing broadly.\nIf you want compression, use TAR.GZ/TGZ.',
+		},
+		{
+			ext: '.TAR.GZ',
+			kind: 'Archive',
+			support: 'High',
+			size: 'Smaller',
+			desc: 'Compressed tarball. Great for smaller downloads.',
+			tags: ['Archive'],
+			tooltip:
+				'TAR.GZ vs ZIP: common in developer/Linux/macOS contexts; ZIP is more universally friendly.\nTAR.GZ is great when preserving Unix file metadata matters.',
+		},
+		{
+			ext: '.TGZ',
+			kind: 'Archive',
+			support: 'High',
+			size: 'Smaller',
+			desc: 'Same as .tar.gz (short form).',
+			tags: ['Archive'],
+			tooltip:
+				'TGZ is the same as TAR.GZ. Choose whichever naming convention your workflow expects.\nFor broad sharing with non-technical users, ZIP is often easier.',
+		},
+		{
+			ext: '.7Z',
+			kind: 'Archive',
+			support: 'Medium',
+			size: 'Smallest',
+			desc: 'High compression. Great for large archives (needs 7-Zip support).',
+			tags: ['Archive'],
+			tooltip:
+				'7Z vs ZIP: 7Z can compress better (smaller), but ZIP opens more easily everywhere.\nUse 7Z for maximum compression; use ZIP for easiest sharing.',
+		},
+		{
+			ext: '.EXTRACT',
+			kind: 'Extract',
+			support: 'N/A',
+			size: 'N/A',
+			desc: 'Extracts archives into a folder (output is a directory, not a file type).',
+			tags: ['Action'],
+			tooltip:
+				'EXTRACT is an action, not a file format.\nUse it to unpack ZIP/TAR/TGZ/7Z (and some RAR) into a folder.',
+		},
+	];
+
+	function setupHelpTooltips() {
+		if (!appTooltip) return;
+		let activeEl: HTMLElement | null = null;
+
+		const show = (text: string, x: number, y: number) => {
+			appTooltip.textContent = text;
+			appTooltip.hidden = text.length === 0;
+			if (appTooltip.hidden) return;
+			const offset = 14;
+			const maxX = window.innerWidth - 20;
+			const maxY = window.innerHeight - 20;
+			let left = x + offset;
+			let top = y + offset;
+			appTooltip.style.left = `${Math.min(left, maxX)}px`;
+			appTooltip.style.top = `${Math.min(top, maxY)}px`;
+		};
+
+		const hide = () => {
+			activeEl = null;
+			appTooltip.hidden = true;
+			appTooltip.textContent = '';
+		};
+
+		document.addEventListener('mouseover', (ev) => {
+			const target = ev.target as HTMLElement | null;
+			const el = target?.closest?.('[data-tooltip]') as HTMLElement | null;
+			if (!el) return;
+			const text = el.dataset.tooltip || '';
+			if (!text) return;
+			activeEl = el;
+			show(text, (ev as MouseEvent).clientX, (ev as MouseEvent).clientY);
+		});
+
+		document.addEventListener('mousemove', (ev) => {
+			if (!activeEl || appTooltip.hidden) return;
+			show(activeEl.dataset.tooltip || '', (ev as MouseEvent).clientX, (ev as MouseEvent).clientY);
+		});
+
+		document.addEventListener('mouseout', (ev) => {
+			if (!activeEl) return;
+			const related = (ev as MouseEvent).relatedTarget as HTMLElement | null;
+			if (related && activeEl.contains(related)) return;
+			const target = ev.target as HTMLElement | null;
+			const from = target?.closest?.('[data-tooltip]') as HTMLElement | null;
+			if (from === activeEl) hide();
+		});
+
+		window.addEventListener('blur', hide);
+		window.addEventListener('scroll', hide, true);
+	}
+
+	function renderHelp() {
+		if (!helpList) return;
+		helpList.innerHTML = '';
+
+		const kindOrder: HelpItem['kind'][] = [
+			'Image',
+			'PDF',
+			'Audio',
+			'Video',
+			'Archive',
+			'Extract',
+		];
+
+		let firstKind = true;
+		for (const kindKey of kindOrder) {
+			const items = helpItems.filter((i) => i.kind === kindKey);
+			if (items.length === 0) continue;
+			if (!firstKind) {
+				const hr = document.createElement('hr');
+				hr.className = 'help-sep';
+				helpList.appendChild(hr);
+			}
+			firstKind = false;
+
+			const group = document.createElement('div');
+			group.className = 'help-group';
+			group.textContent = kindKey;
+			helpList.appendChild(group);
+
+			for (const item of items) {
+				const row = document.createElement('div');
+				row.className = 'help-row';
+				row.dataset.tooltip = item.tooltip;
+
+				const left = document.createElement('div');
+				left.className = 'help-left';
+
+				const top = document.createElement('div');
+				top.className = 'help-top';
+
+				const extText = document.createElement('span');
+				extText.className = 'help-ext-text';
+				extText.textContent = item.ext;
+				extText.dataset.tooltip = item.tooltip;
+
+				const chips = document.createElement('span');
+				chips.className = 'help-chips';
+				for (const tag of item.tags) {
+					const chip = document.createElement('span');
+					chip.className = 'help-chip';
+					chip.textContent = tag;
+					chip.dataset.tag = tag;
+					chip.dataset.tooltip = item.tooltip;
+					chips.appendChild(chip);
+				}
+
+				top.append(extText, chips);
+
+				const desc = document.createElement('div');
+				desc.className = 'help-desc';
+				desc.textContent = item.desc;
+				desc.dataset.tooltip = item.tooltip;
+
+				left.append(top, desc);
+
+				const right = document.createElement('div');
+				right.className = 'help-right';
+
+				const support = document.createElement('div');
+				support.className = 'help-support';
+				support.textContent = item.support;
+				support.dataset.tooltip = item.tooltip;
+
+				const size = document.createElement('div');
+				size.className = 'help-size';
+				size.textContent = item.size;
+				size.dataset.tooltip = item.tooltip;
+
+				right.append(support, size);
+				row.append(left, right);
+				helpList.appendChild(row);
+			}
+		}
+	}
+
+	setupHelpTooltips();
+	renderHelp();
+
 	if (!dropZone || !fileList || !targetSelect || !convertButton) return;
 	
 	const dropped: DroppedFile[] = [];
@@ -190,6 +640,7 @@ function setupConvertTab() {
 	const jobBytesByKey = new Map<string, number>();
 	let hideProgressTimer: number | null = null;
 	let resultsFilterText = '';
+	const jobStartedAtMsByKey = new Map<string, number>();
 	let outputDirEffective: string | null = null;
 	let outputDirConfigured: string | null = null;
 	let contextMenuResultIndex: number | null = null;
@@ -391,11 +842,27 @@ function setupConvertTab() {
 
 	type SourceKind = 'image' | 'audio' | 'video' | 'archive' | 'other';
 
+	const IMAGE_EXTS = new Set([
+		'.PNG', '.JPG', '.JPEG', '.WEBP', '.GIF', '.BMP', '.TIF', '.TIFF', '.HEIC', '.HEIF', '.AVIF', '.SVG', '.ICO',
+	]);
+	const AUDIO_EXTS = new Set([
+		'.MP3', '.WAV', '.M4A', '.AAC', '.FLAC', '.OGG', '.OPUS', '.WMA', '.AIFF', '.AIF', '.AIFC',
+	]);
+	const VIDEO_EXTS = new Set([
+		'.MP4', '.MOV', '.M4V', '.MKV', '.WEBM', '.AVI', '.WMV', '.FLV', '.MPG', '.MPEG', '.3GP',
+	]);
+	const ARCHIVE_EXTS = new Set([
+		'.ZIP', '.RAR', '.7Z', '.TAR', '.TAR.GZ', '.TGZ',
+	]);
+
 	function kindFromFile(f: DroppedFile): SourceKind {
 		// Prefer extension-based detection (more reliable across platforms), then mime.
 		const ext = (f.ext || '').toUpperCase();
 		if (ext === '.PDF') return 'image';
-		if (['.ZIP', '.RAR', '.7Z', '.TAR', '.TAR.GZ', '.TGZ'].includes(ext)) return 'archive';
+		if (ARCHIVE_EXTS.has(ext)) return 'archive';
+		if (IMAGE_EXTS.has(ext)) return 'image';
+		if (AUDIO_EXTS.has(ext)) return 'audio';
+		if (VIDEO_EXTS.has(ext)) return 'video';
 		const m = (f.mime || '').toLowerCase();
 		if (m === 'application/pdf' || m === 'application/x-pdf' || m.endsWith('/pdf')) return 'image';
 		if (m.startsWith('image/')) return 'image';
@@ -405,9 +872,9 @@ function setupConvertTab() {
 	}
 
 	function allowedTargetsForKind(kind: SourceKind): string[] {
-		if (kind === 'image') return ['.PNG', '.JPEG', '.WEBP', '.PDF'];
-		if (kind === 'audio') return ['.MP3', '.WAV', '.M4A'];
-		if (kind === 'video') return ['.MP4', '.MOV', '.MP3', '.WAV', '.M4A'];
+		if (kind === 'image') return ['.PNG', '.JPEG', '.JPG', '.WEBP', '.TIFF', '.PDF'];
+		if (kind === 'audio') return ['.MP3', '.WAV', '.M4A', '.AAC', '.FLAC', '.OGG', '.OPUS'];
+		if (kind === 'video') return ['.MP4', '.MOV', '.MKV', '.WEBM', '.MP3', '.WAV', '.M4A', '.AAC', '.FLAC', '.OGG', '.OPUS'];
 		if (kind === 'archive') return ['.EXTRACT', '.ZIP', '.TAR', '.TAR.GZ', '.TGZ', '.7Z'];
 		return [];
 	}
@@ -510,6 +977,54 @@ function setupConvertTab() {
 			allowed = allowed.filter((x) => x !== '.PDF');
 		}
 		const prev = targetSelect.value;
+
+		const recentKey = kind && kind !== 'other' ? `convertable:recentTargets:${kind}` : null;
+		const loadRecent = (): string[] => {
+			if (!recentKey) return [];
+			try {
+				const raw = localStorage.getItem(recentKey);
+				if (!raw) return [];
+				const parsed = JSON.parse(raw);
+				if (!Array.isArray(parsed)) return [];
+				return parsed.filter((x) => typeof x === 'string' && x);
+			} catch {
+				return [];
+			}
+		};
+		const saveRecent = (value: string) => {
+			if (!recentKey) return;
+			try {
+				const existing = loadRecent();
+				const next = [value, ...existing.filter((x) => x !== value)].slice(0, 6);
+				localStorage.setItem(recentKey, JSON.stringify(next));
+			} catch {
+				// ignore
+			}
+		};
+
+		// Reorder allowed targets so recents appear first (still only showing allowed values).
+		if (kind && kind !== 'other' && allowed.length > 0) {
+			const recents = loadRecent();
+			if (recents.length > 0) {
+				const seen = new Set<string>();
+				const ordered: string[] = [];
+				for (const r of recents) {
+					if (!allowed.includes(r)) continue;
+					if (seen.has(r)) continue;
+					seen.add(r);
+					ordered.push(r);
+				}
+				for (const a of allowed) {
+					if (seen.has(a)) continue;
+					seen.add(a);
+					ordered.push(a);
+				}
+				allowed = ordered;
+			}
+
+			// Also ensure the currently selected value (prev) is treated as recent.
+			if (prev && allowed.includes(prev)) saveRecent(prev);
+		}
 		targetSelect.innerHTML = '';
 		for (const ext of allowed) {
 			const opt = document.createElement('option');
@@ -557,6 +1072,18 @@ function setupConvertTab() {
 		if (!kind || kind === 'other') return;
 		try {
 			localStorage.setItem(`convertable:lastTarget:${kind}`, targetSelect.value);
+			// Update recent list too.
+			const k = `convertable:recentTargets:${kind}`;
+			const raw = localStorage.getItem(k);
+			let existing: string[] = [];
+			try {
+				const parsed = raw ? JSON.parse(raw) : [];
+				if (Array.isArray(parsed)) existing = parsed.filter((x) => typeof x === 'string' && x);
+			} catch {
+				// ignore
+			}
+			const next = [targetSelect.value, ...existing.filter((x) => x !== targetSelect.value)].slice(0, 6);
+			localStorage.setItem(k, JSON.stringify(next));
 		} catch {
 			// ignore
 		}
@@ -783,7 +1310,25 @@ function setupConvertTab() {
 	}
 
 	function jobKey(srcPath: string, targetExt: string): string {
-		return `${srcPath}::${targetExt}`;
+		return `${srcPath}::${targetExt}::1`;
+	}
+
+	function jobKeyWithScale(srcPath: string, targetExt: string, scale?: number): string {
+		return `${srcPath}::${targetExt}::${normalizeScale(scale ?? 1)}`;
+	}
+
+	function hasJobKeyInAnyQueue(key: string): boolean {
+		for (const w of workers) {
+			if (w.running) {
+				const k = jobKeyWithScale(w.running.sourcePath, w.running.targetExt, w.running.scale);
+				if (k === key) return true;
+			}
+			for (const p of w.pending) {
+				const k = jobKeyWithScale(p.sourcePath, p.targetExt, p.scale);
+				if (k === key) return true;
+			}
+		}
+		return false;
 	}
 
 	function ensureWorkers(count: number) {
@@ -822,9 +1367,9 @@ function setupConvertTab() {
 		return c;
 	}
 
-	function allPendingQueuesForEngine(): { srcPath: string; targetExt: string; workerId?: number }[][] {
+	function allPendingQueuesForEngine(): { srcPath: string; targetExt: string; workerId?: number; scale?: number }[][] {
 		return workers.map((w, workerId) =>
-			w.pending.map((j) => ({ srcPath: j.sourcePath, targetExt: j.targetExt, workerId })),
+			w.pending.map((j) => ({ srcPath: j.sourcePath, targetExt: j.targetExt, workerId, scale: j.scale })),
 		);
 	}
 
@@ -862,7 +1407,7 @@ function setupConvertTab() {
 		w.pending.push(job);
 		lastActiveWorkerId = w.workerId;
 
-		const k = jobKey(job.sourcePath, job.targetExt);
+		const k = jobKeyWithScale(job.sourcePath, job.targetExt, job.scale);
 		const isNewRun = !runStartMs || runTotal <= 0 || runDone >= runTotal;
 		if (isNewRun) {
 			runStartMs = Date.now();
@@ -1056,7 +1601,7 @@ function setupConvertTab() {
 		const metas = await window.convertable.getFileMetadata(unique);
 		for (const m of metas) {
 			if (dropped.some((x) => x.path === m.path)) continue;
-			dropped.push(m);
+			dropped.push({ ...m, addedAtMs: Date.now() });
 		}
 		// UX: when users add multiple files (drop/pick), they typically expect Convert
 		// to run on all of them without needing multi-select.
@@ -1084,19 +1629,26 @@ function setupConvertTab() {
 			if (!f) continue;
 			const row = document.createElement('div');
 			row.className = 'file-row';
+			row.dataset.tooltip = [
+				`Name: ${f.name}`,
+				`Type: ${f.ext} (${f.mime || '—'})`,
+				`Size: ${humanBytes(f.sizeBytes)}`,
+				`Resolution: ${formatDims(f.width, f.height)}`,
+				`Added: ${formatDateTime(f.addedAtMs)}`,
+				`Modified: ${formatDateTime(f.mtimeMs)}`,
+				`Path: ${f.path}`,
+			].join('\n');
 			if (idx >= animateFromIndex) row.classList.add('animate-in');
 			row.classList.toggle('selected', selected.has(f.path));
 			const name = document.createElement('span');
 			name.className = 'file-name';
 			name.textContent = f.name;
-			name.title = f.path;
 			const size = document.createElement('span');
 			size.className = 'file-size';
 			size.textContent = humanSize(f.sizeBytes);
 			const ext = document.createElement('span');
 			ext.className = 'file-ext';
 			ext.textContent = f.ext;
-			ext.title = f.mime;
 			const mime = document.createElement('span');
 			mime.className = 'file-mime';
 			mime.textContent = f.mime;
@@ -1143,20 +1695,30 @@ function setupConvertTab() {
 			const item = results[idx];
 			if (!item) continue;
 			if (resultsFilterText) {
-				const hay = `${basename(item.outputPath)} ${item.targetExt} ${item.sourceName}`.toLowerCase();
+				const hay = `${basename(item.outputPath)} ${item.targetExt} ${item.sourceName} ${item.status ?? ''} ${item.error ?? ''}`.toLowerCase();
 				if (!hay.includes(resultsFilterText)) continue;
 			}
 			const row = document.createElement('div');
 			row.className = 'result-row';
+			row.classList.toggle('is-error', item.status === 'error');
+			const dur = typeof item.durationMs === 'number' ? humanDuration(item.durationMs / 1000) : '—';
+			row.dataset.tooltip = [
+				`Source: ${item.sourceName}`,
+				`Target: ${item.targetExt}`,
+				`Scale: ${formatScalePct(item.scale)}`,
+				`Output resolution: ${formatDims(item.outputWidth, item.outputHeight)}`,
+				`Time taken: ${dur}`,
+				item.status === 'error' && item.error ? `Error: ${item.error}` : `Output: ${item.outputPath}`,
+			].filter(Boolean).join('\n');
 			if (idx >= animateFromIndex) row.classList.add('animate-in');
 			row.draggable = true;
 			const name = document.createElement('span');
 			name.className = 'result-name';
 			name.textContent = basename(item.outputPath);
-			name.title = item.outputPath;
+			name.title = '';
 			const target = document.createElement('span');
 			target.className = 'result-ext';
-			target.textContent = item.targetExt;
+			target.textContent = item.status === 'error' ? `${item.targetExt} (failed)` : item.targetExt;
 			const reveal = document.createElement('button');
 			reveal.type = 'button';
 			reveal.textContent = 'Reveal';
@@ -1222,19 +1784,37 @@ function setupConvertTab() {
 						return;
 					}
 					if (action === 'rerun') {
+						const ext = extFromName(item.sourcePath);
+						const isImageLike = ext === '.PDF' || IMAGE_EXTS.has(ext);
+						const scale = isImageLike ? imageScale : undefined;
 						const job: ConversionJob = {
 							sourcePath: item.sourcePath,
 							sourceName: item.sourceName ?? basename(item.sourcePath),
 							targetExt: item.targetExt,
+							scale,
 							status: 'Queued',
 							progress: 0,
 						};
+						const key = jobKeyWithScale(job.sourcePath, job.targetExt, job.scale);
+						if (hasJobKeyInAnyQueue(key)) {
+							toast('That job is already queued/running', 'info');
+							return;
+						}
 						const wid = chooseWorkerForNewJob();
 						enqueueToWorker(job, wid);
 						await window.convertable?.enqueueJobs([
-							{ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid },
+							{ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid, scale: job.scale },
 						]);
 						toast(`Queued: ${basename(job.sourcePath)} → ${job.targetExt}`, 'success');
+						return;
+					}
+					if (action === 'copyCommand') {
+						if (!item.command) {
+							toast('No ffmpeg command recorded for this item', 'info');
+							return;
+						}
+						await copyText(item.command);
+						toast('Copied ffmpeg command', 'success');
 						return;
 					}
 					if (action === 'copyPath') {
@@ -1272,15 +1852,17 @@ function setupConvertTab() {
 		if (!w) return;
 		lastActiveWorkerId = wid;
 
-		const k = jobKey(ev.srcPath, ev.targetExt);
+		const k = jobKeyWithScale(ev.srcPath, ev.targetExt, ev.scale);
 		if (ev.type === 'start') {
+			jobStartedAtMsByKey.set(k, Date.now());
 			// Move from pending -> running
-			const idx = w.pending.findIndex((j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt);
+			const idx = w.pending.findIndex((j) => jobKeyWithScale(j.sourcePath, j.targetExt, j.scale) === k);
 			const pendingJob = idx >= 0 ? w.pending.splice(idx, 1)[0] : undefined;
 			w.running = pendingJob ?? {
 				sourcePath: ev.srcPath,
 				sourceName: basename(ev.srcPath),
 				targetExt: ev.targetExt,
+				scale: ev.scale,
 				workerId: wid,
 				status: 'Processing',
 				progress: 0,
@@ -1292,14 +1874,16 @@ function setupConvertTab() {
 			currentJobName = w.running.sourceName;
 			currentJobProgress = 0;
 		} else if (ev.type === 'progress') {
-			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+			if (w.running && jobKeyWithScale(w.running.sourcePath, w.running.targetExt, w.running.scale) === k) {
 				w.running.progress = ev.progress;
 				w.running.status = 'Processing';
 			}
 			jobProgressByKey.set(k, ev.progress);
 			if (currentJobKey === k) currentJobProgress = ev.progress;
 		} else if (ev.type === 'done') {
-			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+			const started = jobStartedAtMsByKey.get(k);
+			const durationMs = typeof started === 'number' ? Math.max(0, Date.now() - started) : undefined;
+			if (w.running && jobKeyWithScale(w.running.sourcePath, w.running.targetExt, w.running.scale) === k) {
 				w.running.status = 'Done';
 				w.running.progress = 1;
 			}
@@ -1308,6 +1892,12 @@ function setupConvertTab() {
 				sourceName: w.running?.sourceName ?? basename(ev.srcPath),
 				outputPath: ev.outputPath,
 				targetExt: ev.targetExt,
+				scale: ev.scale,
+				durationMs,
+				outputWidth: (ev as any).outputWidth,
+				outputHeight: (ev as any).outputHeight,
+				status: 'done',
+				command: (ev as any).command,
 			});
 			renderResults();
 			w.running = null;
@@ -1318,10 +1908,27 @@ function setupConvertTab() {
 			toast(`Finished: ${basename(ev.srcPath)} → ${ev.targetExt}`, 'success', 2400);
 			maybeNotifyRunComplete();
 		} else if (ev.type === 'error') {
-			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+			const started = jobStartedAtMsByKey.get(k);
+			const durationMs = typeof started === 'number' ? Math.max(0, Date.now() - started) : undefined;
+			if (w.running && jobKeyWithScale(w.running.sourcePath, w.running.targetExt, w.running.scale) === k) {
 				w.running.status = 'Error';
 				w.running.error = ev.message;
 			}
+			// Record the failure in Results so it can be retried and its ffmpeg command copied.
+			results.push({
+				sourcePath: ev.srcPath,
+				sourceName: w.running?.sourceName ?? basename(ev.srcPath),
+				outputPath: ev.srcPath,
+				targetExt: ev.targetExt,
+				scale: ev.scale,
+				durationMs,
+				status: 'error',
+				error: ev.message,
+				command: (ev as any).command,
+			});
+			renderResults();
+			// Clear the running slot so the worker doesn't look stuck.
+			w.running = null;
 			runDone = Math.min(runTotal, runDone + 1);
 			runErrorCount += 1;
 			jobProgressByKey.set(k, 1);
@@ -1329,10 +1936,10 @@ function setupConvertTab() {
 			toast(`Error: ${basename(ev.srcPath)} → ${ev.targetExt}`, 'error', 5200);
 			maybeNotifyRunComplete();
 		} else if (ev.type === 'canceled') {
-			if (w.running && w.running.sourcePath === ev.srcPath && w.running.targetExt === ev.targetExt) {
+			if (w.running && jobKeyWithScale(w.running.sourcePath, w.running.targetExt, w.running.scale) === k) {
 				w.running = null;
 			} else {
-				const idx = w.pending.findIndex((j) => j.sourcePath === ev.srcPath && j.targetExt === ev.targetExt);
+				const idx = w.pending.findIndex((j) => jobKeyWithScale(j.sourcePath, j.targetExt, j.scale) === k);
 				if (idx >= 0) w.pending.splice(idx, 1);
 			}
 			runDone = runTotal > 0 ? Math.min(runTotal, runDone + 1) : runDone;
@@ -1556,6 +2163,8 @@ function setupConvertTab() {
 		if (convertButton.disabled) return;
 		const targetExt = targetSelect.value.trim();
 		if (!targetExt) return;
+		const kind = selectionKind();
+		const scale = kind === 'image' ? imageScale : undefined;
 		const srcPaths = selected.size > 0 ? Array.from(selected) : dropped.map((f) => f.path);
 		const jobs = srcPaths.map<ConversionJob>((p) => {
 			const f = dropped.find((x) => x.path === p);
@@ -1563,22 +2172,37 @@ function setupConvertTab() {
 				sourcePath: f?.path ?? p,
 				sourceName: f?.name ?? basename(p),
 				targetExt,
+				scale,
 				status: 'Queued',
 				progress: 0,
 			};
 		});
 
-		const enq: { srcPath: string; targetExt: string; workerId?: number }[] = [];
+		const enq: { srcPath: string; targetExt: string; workerId?: number; scale?: number }[] = [];
+		let skipped = 0;
 		for (const job of jobs) {
+			const key = jobKeyWithScale(job.sourcePath, job.targetExt, job.scale);
+			if (hasJobKeyInAnyQueue(key)) {
+				skipped += 1;
+				continue;
+			}
 			const wid = chooseWorkerForNewJob();
 			enqueueToWorker(job, wid);
-			enq.push({ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid });
+			enq.push({ srcPath: job.sourcePath, targetExt: job.targetExt, workerId: wid, scale: job.scale });
+		}
+		if (enq.length === 0) {
+			if (skipped > 0) toast(`Skipped ${skipped} duplicate job${skipped === 1 ? '' : 's'}`, 'info');
+			return;
 		}
 		await window.convertable.enqueueJobs(enq);
+		if (skipped > 0) toast(`Skipped ${skipped} duplicate job${skipped === 1 ? '' : 's'}`, 'info', 2600);
 	});
 	
 	if (window.convertable) {
 		window.convertable.onEngineEvent(handleEngineEvent);
+		window.convertable.onOpenFiles?.((paths) => {
+			void addFilesByPath(paths);
+		});
 	}
 	async function refreshEngineState() {
 		const api = window.convertable;

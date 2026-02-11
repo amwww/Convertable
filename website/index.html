@@ -177,16 +177,29 @@
               <a class="btn" href="https://github.com/amwww/Convertable/releases/latest" target="_blank" rel="noreferrer" data-asset-pattern="Convertable-.*-x64\.zip$" aria-label="Download ZIP for macOS Intel">
                 macOS (Intel ZIP)
               </a>
-              <a class="btn" href="#" aria-disabled="true" tabindex="-1" style="opacity: .55; cursor: not-allowed;">
-                Windows (soon)
+              <a class="btn" href="https://github.com/amwww/Convertable/releases/latest" target="_blank" rel="noreferrer" data-asset-pattern="Convertable-.*-x64\.exe$" aria-label="Download for Windows">
+                Windows (Installer)
               </a>
-              <a class="btn" href="#" aria-disabled="true" tabindex="-1" style="opacity: .55; cursor: not-allowed;">
-                Linux (soon)
+              <a class="btn" href="https://github.com/amwww/Convertable/releases/latest" target="_blank" rel="noreferrer" data-asset-pattern="Convertable-.*-x64\.AppImage$" aria-label="Download for Linux">
+                Linux (AppImage)
               </a>
             </div>
 
             <div class="note">
               Tip: if macOS blocks the app on first run, open System Settings → Privacy & Security and allow it.
+            </div>
+
+            <div class="note" style="margin-top: 12px;">
+              <strong>Gatekeeper note:</strong> Convertable is currently distributed without Apple notarization.
+              macOS may block the first launch for apps downloaded from the internet.
+              The safest option is to use <em>System Settings → Privacy &amp; Security → Open Anyway</em>.
+              Advanced users can also remove the quarantine attribute (at your own risk):
+
+              <div style="display:flex; gap: 10px; align-items:center; margin-top: 10px; flex-wrap: wrap;">
+                <code style="user-select: all; padding: 8px 10px; border-radius: 10px; background: rgba(2,6,23,.55); border: 1px solid rgba(148,163,184,.18); color: rgba(226,232,240,.92);">xattr -dr com.apple.quarantine "/Applications/Convertable.app"</code>
+                <button class="btn" type="button" data-copy-text='xattr -dr com.apple.quarantine "/Applications/Convertable.app"'>Copy command</button>
+              </div>
+              <div style="margin-top: 8px; color: rgba(148,163,184,.9); font-size: 12px;">Why this happens: macOS attaches a quarantine flag to internet downloads and checks the app’s signature/notarization status.</div>
             </div>
           </div>
 

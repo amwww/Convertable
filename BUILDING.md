@@ -77,6 +77,31 @@ Output (under `release/`):
 - `Convertable-<version>-x64.dmg`
 - `Convertable-<version>-x64.zip`
 
+## Windows builds
+
+Windows builds are easiest on CI (Windows runner), but you can try locally if you have the required tooling.
+
+```bash
+npm run dist:win
+```
+
+Expected output (under `release/`):
+
+- `Convertable-<version>-x64.exe`
+
+## Linux builds
+
+Linux builds are easiest on CI (Ubuntu runner).
+
+```bash
+npm run dist:linux
+```
+
+Expected output (under `release/`):
+
+- `Convertable-<version>-x64.AppImage`
+- `Convertable-<version>-x64.deb`
+
 ## In-app auto-updates (GitHub Releases)
 
 This app supports in-app updates via **electron-updater**.
@@ -137,6 +162,17 @@ If you want unsigned builds for local use, use:
 ```bash
 npm run dist:mac:unsigned
 ```
+
+## Recommended release flow (GitHub Actions)
+
+This repo includes a multi-platform release workflow at [.github/workflows/release.yml](.github/workflows/release.yml).
+
+To create a release build for macOS + Windows + Linux:
+
+1) Bump version in `package.json`
+2) Create and push a tag like `v1.0.1`
+
+GitHub Actions will build on macOS/Windows/Linux and upload artifacts to a GitHub Release for that tag.
 
 ### Build “dist” artifacts
 

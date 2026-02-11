@@ -18,6 +18,9 @@
     "dist:mac:arm64": "npm run build && electron-builder --mac --arm64",
     "dist:mac:x64": "npm run build && electron-builder --mac --x64",
     "dist:mac:all": "npm run build && electron-builder --mac --arm64 --x64",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:all": "npm run build && electron-builder --mac --arm64 --x64 --win --linux",
     "watch": "tsc -w --preserveWatchOutput",
     "electron:watch": "node scripts/electron-dev.mjs",
     "start": "npm run build && electron ."
@@ -59,6 +62,7 @@
     "electron": "^34.0.0",
     "electron-builder": "^24.13.3",
     "nodemon": "^3.1.11",
+    "png-to-ico": "^2.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "wait-on": "^9.0.3"
@@ -98,6 +102,26 @@
       ],
       "icon": "build-resources/icon.icns",
       "gatekeeperAssess": false
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build-resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "build-resources/icon.png",
+      "category": "Utility"
     },
     "afterSign": "scripts/notarize.mjs",
     "publish": [

@@ -248,6 +248,21 @@
             cursor: grabbing;
         }
 
+        /* Failed result rows: subtle visual cue without introducing new colors */
+        .result-row.is-error {
+            background: rgba(15, 23, 42, 0.55);
+            outline: 1px dashed rgba(156, 163, 175, 0.35);
+            opacity: 0.88;
+        }
+
+        .result-row.is-error:hover {
+            background: rgba(15, 23, 42, 0.7);
+        }
+
+        .result-row.is-error .result-name {
+            color: var(--text-muted);
+        }
+
         .convert-progress {
             border-radius: 12px;
             border: 1px solid var(--border-subtle);
@@ -493,6 +508,20 @@
             justify-content: flex-end;
             gap: 8px;
             max-width: 620px;
+        }
+
+        .scale-control {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .scale-control input[type="range"] {
+            width: 120px;
+        }
+
+        .scale-control input[type="range"]:disabled {
+            opacity: 0.55;
         }
 
         .output-row .output-label {
@@ -875,6 +904,186 @@
             gap: 10px;
             flex-wrap: wrap;
         }
+
+        .help-legend {
+            margin-top: 4px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .help-list {
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.85);
+            padding: 8px 10px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 360px;
+            overflow: auto;
+        }
+
+        .help-group {
+            font-size: 11px;
+            color: var(--text-muted);
+            padding: 6px 4px 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .help-sep {
+            width: 100%;
+            border: none;
+            height: 1px;
+            background: rgba(31, 41, 55, 0.75);
+            margin: 6px 0;
+        }
+
+        .help-row {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 12px;
+            padding: 6px 8px;
+            border-radius: 10px;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid rgba(31, 41, 55, 0.7);
+        }
+
+        .help-left {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .help-top {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .help-ext-text {
+            font-weight: 600;
+            color: var(--text-main);
+            min-width: 72px;
+            white-space: nowrap;
+        }
+
+        .help-chips {
+            display: inline-flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .help-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            background: rgba(56, 189, 248, 0.10);
+            color: var(--text-main);
+            font-weight: 600;
+            font-size: 11px;
+            box-sizing: border-box;
+        }
+
+        /* Help chip color variants (based on tag) */
+        .help-chip[data-tag="Image"] {
+            border-color: rgba(56, 189, 248, 0.35);
+            background: rgba(56, 189, 248, 0.12);
+        }
+        .help-chip[data-tag="Raster"] {
+            border-color: rgba(99, 102, 241, 0.35);
+            background: rgba(99, 102, 241, 0.12);
+        }
+        .help-chip[data-tag="Vector"] {
+            border-color: rgba(251, 146, 60, 0.35);
+            background: rgba(251, 146, 60, 0.12);
+        }
+        .help-chip[data-tag="Document"] {
+            border-color: rgba(34, 211, 238, 0.35);
+            background: rgba(34, 211, 238, 0.12);
+        }
+        .help-chip[data-tag="Audio"] {
+            border-color: rgba(34, 197, 94, 0.35);
+            background: rgba(34, 197, 94, 0.12);
+        }
+        .help-chip[data-tag="Video"] {
+            border-color: rgba(168, 85, 247, 0.35);
+            background: rgba(168, 85, 247, 0.12);
+        }
+        .help-chip[data-tag="Archive"] {
+            border-color: rgba(250, 204, 21, 0.35);
+            background: rgba(250, 204, 21, 0.10);
+        }
+        .help-chip[data-tag="Action"] {
+            border-color: rgba(148, 163, 184, 0.35);
+            background: rgba(148, 163, 184, 0.10);
+        }
+
+        #app-tooltip {
+            position: fixed;
+            z-index: 10000;
+            pointer-events: none;
+            max-width: 420px;
+            white-space: pre-wrap;
+            border-radius: 12px;
+            border: 1px solid rgba(31, 41, 55, 0.95);
+            background: rgba(2, 6, 23, 0.96);
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.7);
+            padding: 10px 12px;
+            font-size: 12px;
+            line-height: 1.25;
+            color: var(--text-main);
+        }
+
+        .help-kind {
+            color: var(--text-muted);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .help-desc {
+            color: var(--text-muted);
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .help-right {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+        }
+
+        .help-support {
+            font-size: 12px;
+            color: var(--text-main);
+            white-space: nowrap;
+        }
+
+        .help-backend {
+            font-size: 11px;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .help-size {
+            font-size: 11px;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -917,6 +1126,10 @@
                     </span>
                     <span class="tab-label">Settings</span>
                 </button>
+                <button type="button" data-tab="help">
+                    <span class="tab-icon" aria-hidden="true">?</span>
+                    <span class="tab-label">Help</span>
+                </button>
             </nav>
         </header>
 
@@ -951,13 +1164,34 @@
                             <select id="target-ext-select" aria-label="Target extension">
                                 <option value=".PNG">.PNG</option>
                                 <option value=".JPEG">.JPEG</option>
+                                <option value=".JPG">.JPG</option>
                                 <option value=".WEBP">.WEBP</option>
+                                <option value=".TIFF">.TIFF</option>
+                                <option value=".PDF">.PDF</option>
                                 <option value=".MP3">.MP3</option>
                                 <option value=".WAV">.WAV</option>
                                 <option value=".M4A">.M4A</option>
+                                <option value=".AAC">.AAC</option>
+                                <option value=".FLAC">.FLAC</option>
+                                <option value=".OGG">.OGG</option>
+                                <option value=".OPUS">.OPUS</option>
                                 <option value=".MP4">.MP4</option>
                                 <option value=".MOV">.MOV</option>
+                                <option value=".MKV">.MKV</option>
+                                <option value=".WEBM">.WEBM</option>
+                                <option value=".ZIP">.ZIP</option>
+                                <option value=".TAR">.TAR</option>
+                                <option value=".TAR.GZ">.TAR.GZ</option>
+                                <option value=".TGZ">.TGZ</option>
+                                <option value=".7Z">.7Z</option>
+                                <option value=".EXTRACT">.EXTRACT</option>
                             </select>
+
+                            <span class="scale-control" aria-label="Scale">
+                                <span class="hint" style="white-space:nowrap;">Scale</span>
+                                <input id="scale-range" type="range" min="25" max="400" step="25" value="100" />
+                                <span class="hint" id="scale-label" style="min-width:44px; text-align:right;">100%</span>
+                            </span>
                             <button class="secondary small" id="clear-files-button" type="button">Clear Files</button>
                             <button class="primary" id="convert-button" type="button">Convert</button>
                         </div>
@@ -1063,6 +1297,31 @@
                     </div>
                 </div>
             </section>
+
+            <section class="tab-panel" id="tab-help">
+                <div class="panel-toolbar">
+                    <div class="hint">Formats and support notes.</div>
+                    <div></div>
+                </div>
+
+                <div class="settings-grid" aria-label="Help">
+                    <div class="settings-card" aria-label="How it works">
+                        <div class="settings-title">How Convertable works</div>
+                        <div class="settings-desc">A quick overview of the workflow.</div>
+                        <div class="hint">1) Drop files (or choose files).</div>
+                        <div class="hint">2) Select a target extension.</div>
+                        <div class="hint">3) Click Convert. Track progress in the Queue tab.</div>
+                        <div class="hint">4) Find outputs in the Result tab (you can drag results to Finder/Desktop).</div>
+                        <div class="hint">Some formats are fast remuxes; others require full transcoding and take longer.</div>
+                    </div>
+                    <div class="settings-card" aria-label="Extension help">
+                        <div class="settings-title">Extension help</div>
+                        <div class="settings-desc">Benefits/applications and how much support each format has.</div>
+                        <div class="help-legend">Support is real-world compatibility (apps/browsers/devices). Size is typical, but content-dependent.</div>
+                        <div class="help-list" id="help-list" aria-label="Extension list"></div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -1071,12 +1330,15 @@
     <div id="result-context-menu" class="context-menu" hidden>
         <button type="button" data-action="reveal">Reveal in Finder</button>
         <button type="button" data-action="rerun">Re-run conversion</button>
+        <button type="button" data-action="copyCommand">Copy ffmpeg command</button>
         <div class="sep"></div>
         <button type="button" data-action="copyPath">Copy output path</button>
         <button type="button" data-action="copyName">Copy filename</button>
         <div class="sep"></div>
         <button type="button" data-action="remove">Remove from results</button>
     </div>
+
+    <div id="app-tooltip" hidden></div>
 
     <script type="module" src="./dist/index.js"></script>
 </body>
